@@ -9,10 +9,10 @@ simulated match to DuckDB in batches to keep memory usage bounded.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Sequence
 
 import duckdb
 import numpy as np
@@ -152,6 +152,10 @@ def simulate_world_cup(
     )
     if len(teams) < 2 or not _is_power_of_two(len(teams)):
         raise ValueError("teams must contain a power-of-two number of entries.")
+    if iterations <= 0:
+        raise ValueError("iterations must be greater than zero.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be greater than zero.")
 
     initialize_simulated_results(db_path)
     rng = np.random.default_rng(seed)
