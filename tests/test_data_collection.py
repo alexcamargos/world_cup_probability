@@ -25,6 +25,7 @@ def test_load_historical_matches_applies_2010_cutoff(tmp_path: Path) -> None:
                 "2009-12-31,Brazil,Argentina,1,0,Friendly,Doha,Qatar,TRUE",
                 "2010-01-01,Brazil,Argentina,2,1,Friendly,Doha,Qatar,TRUE",
                 "2014-07-13,Germany,Argentina,1,0,FIFA World Cup,Rio de Janeiro,Brazil,TRUE",
+                "2026-06-19,Scotland,Morocco,NA,NA,FIFA World Cup,Foxborough,United States,TRUE",
             ]
         )
         + "\n",
