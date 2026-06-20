@@ -1,0 +1,47 @@
+[project]
+name = "world-cup-probability"
+version = "0.1.0"
+description = "Pipeline de probabilidade para a Copa do Mundo"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.5.4",
+    "kaggle>=2.2.2",
+    "polars>=1.41.2",
+    "pytest>=9.1.1",
+    "ruff>=0.15.18",
+    "scikit-learn>=1.9.0",
+    "xgboost>=3.3.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+    "data",
+    "docs",
+    "models",
+    "reports",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "B",
+    "UP",
+]
+fixable = ["ALL"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+]

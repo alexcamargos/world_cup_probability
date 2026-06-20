@@ -1,0 +1,8 @@
+.git
+.venv
+__pycache__
+.ruff_cache
+data/raw
+dist
+build
+*.egg-info
