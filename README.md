@@ -7,19 +7,19 @@ Base do repositório para modelagem de probabilidades da Copa do Mundo.
 Ordem recomendada:
 
 1. Inicializar o warehouse e carregar dados brutos:
-   - `uv run python src/db_init.py`
+   - `uv run python -m src.db_init`
 2. Calcular o histórico ELO:
-   - `uv run python src/elo_engine.py`
+   - `uv run python -m src.elo_engine`
 3. Gerar a base de features:
-   - `uv run python src/feature_pipeline.py`
+   - `uv run python -m src.feature_pipeline`
 4. Treinar o modelo Poisson e gerar SHAP:
-   - `uv run python src/model.py`
+   - `uv run python -m src.model`
 5. Rodar a simulação Monte Carlo:
-   - `uv run python src/simulator.py`
+   - `uv run python -m src.simulator`
 6. Gerar as análises e CSVs:
-   - `uv run python src/analytics.py`
+   - `uv run python -m src.analytics`
 7. Orquestrar tudo em sequência:
-   - `uv run python src/orchestrator.py --iterations 100000 --batch-size 2500`
+   - `uv run python -m src.orchestrator --iterations 100000 --batch-size 2500`
 
 ## Saídas principais
 
