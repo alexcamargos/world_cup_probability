@@ -372,13 +372,10 @@ def _create_kaggle_api_client() -> KaggleDatasetClient:
         from kaggle.api.kaggle_api_extended import KaggleApi
     except SystemExit as exc:
         _log_kaggle_credentials_error()
-        raise KaggleCredentialsError(
-            "Kaggle API credentials are not configured."
-        ) from exc
+        raise KaggleCredentialsError("Kaggle API credentials are not configured.") from exc
     except ModuleNotFoundError as exc:
         LOGGER.error(
-            "The official Kaggle package is not installed. "
-            "Install it with: uv add kaggle",
+            "The official Kaggle package is not installed. Install it with: uv add kaggle",
         )
         raise IngestionError("Kaggle package is not installed.") from exc
 
@@ -388,14 +385,10 @@ def _create_kaggle_api_client() -> KaggleDatasetClient:
         api.authenticate()
     except SystemExit as exc:
         _log_kaggle_credentials_error()
-        raise KaggleCredentialsError(
-            "Kaggle API credentials are not configured."
-        ) from exc
+        raise KaggleCredentialsError("Kaggle API credentials are not configured.") from exc
     except (OSError, ValueError) as exc:
         _log_kaggle_credentials_error()
-        raise KaggleCredentialsError(
-            "Kaggle API credentials are not configured."
-        ) from exc
+        raise KaggleCredentialsError("Kaggle API credentials are not configured.") from exc
 
     return api
 
