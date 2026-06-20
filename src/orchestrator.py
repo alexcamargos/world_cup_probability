@@ -8,19 +8,45 @@ from __future__ import annotations
 
 import argparse
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
 import polars as pl
 import xgboost as xgb
 
-from db_init import initialize_database
-from elo_engine import DB_PATH as WAREHOUSE_DB_PATH
-from elo_engine import build_elo_history
-from feature_pipeline import build_feature_frame
-from model import BEESWARM_PATH, FEATURE_COLUMNS, MODEL_PATH, save_model, explain_model, prepare_matrices, train_poisson_model
-from simulator import DB_PATH as SIMULATOR_DB_PATH
-from simulator import TeamLambda, simulate_world_cup
+try:
+    from .analytics import export_analytics
+    from .db_init import initialize_database
+    from .elo_engine import DB_PATH as WAREHOUSE_DB_PATH
+    from .elo_engine import build_elo_history
+    from .feature_pipeline import build_feature_frame
+    from .model import (
+        BEESWARM_PATH,
+        FEATURE_COLUMNS,
+        MODEL_PATH,
+        explain_model,
+        prepare_matrices,
+        save_model,
+        train_poisson_model,
+    )
+    from .simulator import TeamLambda, simulate_world_cup
+except ImportError:  # pragma: no cover - supports direct script execution.
+    from analytics import export_analytics
+    from db_init import initialize_database
+    from elo_engine import DB_PATH as WAREHOUSE_DB_PATH
+    from elo_engine import build_elo_history
+    from feature_pipeline import build_feature_frame
+    from model import (
+        BEESWARM_PATH,
+        FEATURE_COLUMNS,
+        MODEL_PATH,
+        explain_model,
+        prepare_matrices,
+        save_model,
+        train_poisson_model,
+    )
+    from simulator import TeamLambda, simulate_world_cup
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +54,23 @@ DEFAULT_ITERATIONS = 100_000
 DEFAULT_BATCH_SIZE = 2_500
 DEFAULT_SEED = 42
 MIN_WORLD_CUP_TEAMS = 32
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineConfig:
+    """Runtime configuration for the end-to-end pipeline."""
+
+    db_path: Path
+    iterations: int
+    batch_size: int
+    seed: int | None
+
+    def validate(self) -> None:
+        """Validate user-provided runtime values before work starts."""
+        if self.iterations <= 0:
+            raise ValueError("iterations must be greater than zero.")
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be greater than zero.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,35 +111,46 @@ def run_pipeline(
     seed: int | None,
 ) -> None:
     """Run the project end-to-end."""
+    config = PipelineConfig(
+        db_path=db_path,
+        iterations=iterations,
+        batch_size=batch_size,
+        seed=seed,
+    )
+    config.validate()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
 
-    LOGGER.info("Step 1/5: initializing DuckDB warehouse.")
-    initialize_database(db_path=db_path)
+    LOGGER.info("Step 1/6: initializing DuckDB warehouse.")
+    initialize_database(db_path=config.db_path)
 
-    LOGGER.info("Step 2/5: building Elo history.")
-    build_elo_history(db_path=db_path)
+    LOGGER.info("Step 2/6: building Elo history.")
+    build_elo_history(db_path=config.db_path)
 
-    LOGGER.info("Step 3/5: building feature frame.")
-    feature_frame = build_feature_frame(db_path=db_path)
+    LOGGER.info("Step 3/6: building feature frame.")
+    feature_frame = build_feature_frame(db_path=config.db_path)
 
-    LOGGER.info("Step 4/5: training Poisson XGBoost model.")
+    LOGGER.info("Step 4/6: training Poisson XGBoost model.")
     X_train, X_valid, y_train, y_valid, feature_names = prepare_matrices(feature_frame)
     model = train_poisson_model(X_train, y_train, X_valid, y_valid)
     save_model(model, MODEL_PATH)
     explain_model(model, X_valid, feature_names, BEESWARM_PATH)
 
-    LOGGER.info("Step 5/5: building team lambdas and running Monte Carlo simulation.")
-    team_lambdas = _build_team_lambdas(db_path=db_path, model=model)
+    LOGGER.info("Step 5/6: building team lambdas and running Monte Carlo simulation.")
+    team_lambdas = _build_team_lambdas(db_path=config.db_path, model=model)
     simulate_world_cup(
         team_lambdas,
-        iterations=iterations,
-        batch_size=batch_size,
-        db_path=SIMULATOR_DB_PATH,
-        seed=seed,
+        iterations=config.iterations,
+        batch_size=config.batch_size,
+        db_path=config.db_path,
+        seed=config.seed,
     )
+
+    LOGGER.info("Step 6/6: exporting analytical summaries.")
+    export_analytics(db_path=config.db_path)
 
     LOGGER.info("Pipeline completed successfully.")
 
@@ -207,7 +261,8 @@ def _build_team_lambdas(
 
     if team_frame.height < MIN_WORLD_CUP_TEAMS:
         raise RuntimeError(
-            f"Need at least {MIN_WORLD_CUP_TEAMS} teams for the World Cup bracket, got {team_frame.height}.",
+            "Need at least "
+            f"{MIN_WORLD_CUP_TEAMS} teams for the World Cup bracket, got {team_frame.height}.",
         )
 
     league_means = team_frame.select(
