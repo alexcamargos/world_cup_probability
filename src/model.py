@@ -36,7 +36,8 @@ MODEL_PATH = MODELS_DIR / "xgb_poisson_model.json"
 BEESWARM_PATH = FIGURES_DIR / "xgb_poisson_beeswarm.png"
 
 FEATURE_COLUMNS: tuple[str, ...] = (
-    "elo_diff",
+    "world_cup_probability_elo_diff",
+    "world_football_elo_ratings_diff",
     "market_value_diff",
     "recent_form_diff",
 )
