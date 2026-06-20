@@ -1,0 +1,57 @@
+# Python bytecode and packaging artifacts
+__pycache__/
+*.py[oc]
+*.pyd
+*.so
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.pre-commit-cache/
+.mypy_cache/
+.hypothesis/
+.nox/
+.tox/
+.cache/
+
+# Coverage and test outputs
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Project data and generated artifacts
+data/raw/
+data/interim/
+data/processed/
+data/derived/
+models/
+reports/
+
+# Local database and binary outputs
+*.duckdb
+*.db
+*.sqlite
+*.parquet
+*.feather
+*.arrow
+
+# OS and editor clutter
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
