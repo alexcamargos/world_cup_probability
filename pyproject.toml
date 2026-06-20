@@ -26,7 +26,8 @@ collection = "src.data_collection:main"
 download-data = "src.data_collection:download_main"
 load-data = "src.data_collection:load_main"
 db-init = "src.db_init:main"
-elo = "src.elo_engine:main"
+world-cup-probability-elo = "src.elo_engine:main"
+world-football-elo-ratings = "src.world_football_elo_ratings:main"
 features = "src.feature_pipeline:main"
 train-model = "src.model:main"
 simulate = "src.simulator:main"
@@ -73,3 +74,6 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.15.18",
 ]
+
+
+
