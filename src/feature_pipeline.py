@@ -71,14 +71,46 @@ def _validate_sources(con: duckdb.DuckDBPyConnection) -> None:
     match_count = con.execute("SELECT COUNT(*) FROM f_matches").fetchone()[0]
     elo_count = con.execute("SELECT COUNT(*) FROM f_elo_history").fetchone()[0]
     if int(match_count) == 0:
-        raise RuntimeError("f_matches is empty. Run the ingestion and Elo engine first.")
+        raise RuntimeError(
+            "f_matches is empty. Run the ingestion and World Cup Probability Elo first."
+        )
     if int(elo_count) == 0:
-        raise RuntimeError("f_elo_history is empty. Run the Elo engine first.")
+        raise RuntimeError("f_elo_history is empty. Run the World Cup Probability Elo step first.")
 
 
 def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
     """Read the consolidated match-level relation from DuckDB into Polars."""
-    query = """
+    has_world_football_elo_ratings = _world_football_elo_ratings_tables_available(con)
+    home_team_key = "regexp_replace(lower(m.home_team_id), '[^a-z0-9]+', '', 'g')"
+    away_team_key = "regexp_replace(lower(m.away_team_id), '[^a-z0-9]+', '', 'g')"
+    home_world_football_elo_ratings_expr = (
+        "COALESCE(her.elo_rating, e.home_rating_before)"
+        if has_world_football_elo_ratings
+        else "e.home_rating_before"
+    )
+    away_world_football_elo_ratings_expr = (
+        "COALESCE(aer.elo_rating, e.away_rating_before)"
+        if has_world_football_elo_ratings
+        else "e.away_rating_before"
+    )
+    world_football_elo_ratings_joins = (
+        f"""
+        LEFT JOIN d_world_football_elo_team_aliases AS hea
+            ON hea.team_alias_key = lower(m.home_team_id)
+            OR hea.normalized_team_alias = {home_team_key}
+        LEFT JOIN d_world_football_elo_ratings AS her
+            ON her.world_football_team_code = hea.world_football_team_code
+        LEFT JOIN d_world_football_elo_team_aliases AS aea
+            ON aea.team_alias_key = lower(m.away_team_id)
+            OR aea.normalized_team_alias = {away_team_key}
+        LEFT JOIN d_world_football_elo_ratings AS aer
+            ON aer.world_football_team_code = aea.world_football_team_code
+        """
+        if has_world_football_elo_ratings
+        else ""
+    )
+
+    query = f"""
         SELECT
             m.match_id,
             m.match_date,
@@ -90,17 +122,20 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
             m.home_team_score,
             m.away_team_score,
             m.neutral_site,
-            e.home_rating_before AS home_elo_before,
-            e.away_rating_before AS away_elo_before,
+            e.home_rating_before AS home_world_cup_probability_elo_before,
+            e.away_rating_before AS away_world_cup_probability_elo_before,
+            {home_world_football_elo_ratings_expr} AS home_world_football_elo_ratings,
+            {away_world_football_elo_ratings_expr} AS away_world_football_elo_ratings,
             COALESCE(ht.market_value_eur, 0.0) AS home_market_value_eur,
-            COALESCE(at.market_value_eur, 0.0) AS away_market_value_eur
+            COALESCE(awt.market_value_eur, 0.0) AS away_market_value_eur
         FROM f_matches AS m
         INNER JOIN f_elo_history AS e
             ON e.match_id = m.match_id
+        {world_football_elo_ratings_joins}
         LEFT JOIN d_teams AS ht
             ON ht.team_id = m.home_team_id
-        LEFT JOIN d_teams AS at
-            ON at.team_id = m.away_team_id
+        LEFT JOIN d_teams AS awt
+            ON awt.team_id = m.away_team_id
         WHERE m.match_date IS NOT NULL
           AND m.home_team_score IS NOT NULL
           AND m.away_team_score IS NOT NULL
@@ -108,6 +143,22 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
     """
     relation = con.sql(query)
     return relation.pl()
+
+
+def _world_football_elo_ratings_tables_available(con: duckdb.DuckDBPyConnection) -> bool:
+    tables = ("d_world_football_elo_ratings", "d_world_football_elo_team_aliases")
+    return all(
+        con.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_name = ?
+            """,
+            [table],
+        ).fetchone()[0]
+        > 0
+        for table in tables
+    )
 
 
 def _build_team_level_features(match_df: pl.DataFrame) -> pl.DataFrame:
@@ -127,7 +178,14 @@ def _build_team_level_features(match_df: pl.DataFrame) -> pl.DataFrame:
 
     feature_df = matched.select(
         [
-            (pl.col("team_elo_before") - pl.col("team_elo_before_away")).alias("elo_diff"),
+            (
+                pl.col("team_world_cup_probability_elo_before")
+                - pl.col("team_world_cup_probability_elo_before_away")
+            ).alias("world_cup_probability_elo_diff"),
+            (
+                pl.col("team_world_football_elo_ratings")
+                - pl.col("team_world_football_elo_ratings_away")
+            ).alias("world_football_elo_ratings_diff"),
             (pl.col("team_market_value_eur") - pl.col("team_market_value_eur_away")).alias(
                 "market_value_diff"
             ),
@@ -152,8 +210,16 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
                 pl.lit("home").alias("side"),
                 pl.col("home_team_id").alias("team"),
                 pl.col("away_team_id").alias("opponent"),
-                pl.col("home_elo_before").alias("team_elo_before"),
-                pl.col("away_elo_before").alias("opponent_elo_before"),
+                pl.col("home_world_cup_probability_elo_before").alias(
+                    "team_world_cup_probability_elo_before"
+                ),
+                pl.col("away_world_cup_probability_elo_before").alias(
+                    "opponent_world_cup_probability_elo_before"
+                ),
+                pl.col("home_world_football_elo_ratings").alias("team_world_football_elo_ratings"),
+                pl.col("away_world_football_elo_ratings").alias(
+                    "opponent_world_football_elo_ratings"
+                ),
                 pl.col("home_market_value_eur").alias("team_market_value_eur"),
                 pl.col("away_market_value_eur").alias("opponent_market_value_eur"),
                 pl.col("home_team_score").alias("goals_for"),
@@ -169,8 +235,14 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
             pl.lit("away").alias("side"),
             pl.col("away_team_id").alias("team"),
             pl.col("home_team_id").alias("opponent"),
-            pl.col("away_elo_before").alias("team_elo_before"),
-            pl.col("home_elo_before").alias("opponent_elo_before"),
+            pl.col("away_world_cup_probability_elo_before").alias(
+                "team_world_cup_probability_elo_before"
+            ),
+            pl.col("home_world_cup_probability_elo_before").alias(
+                "opponent_world_cup_probability_elo_before"
+            ),
+            pl.col("away_world_football_elo_ratings").alias("team_world_football_elo_ratings"),
+            pl.col("home_world_football_elo_ratings").alias("opponent_world_football_elo_ratings"),
             pl.col("away_market_value_eur").alias("team_market_value_eur"),
             pl.col("home_market_value_eur").alias("opponent_market_value_eur"),
             pl.col("away_team_score").alias("goals_for"),
@@ -208,8 +280,10 @@ def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
     return enriched.select(
         [
             pl.col("match_id"),
-            pl.col("team_elo_before"),
-            pl.col("opponent_elo_before"),
+            pl.col("team_world_cup_probability_elo_before"),
+            pl.col("opponent_world_cup_probability_elo_before"),
+            pl.col("team_world_football_elo_ratings"),
+            pl.col("opponent_world_football_elo_ratings"),
             pl.col("team_market_value_eur"),
             pl.col("opponent_market_value_eur"),
             pl.col("recent_form"),
