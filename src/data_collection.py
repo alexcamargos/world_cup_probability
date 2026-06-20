@@ -203,7 +203,6 @@ def load_historical_matches(
         )
 
         con.execute("DELETE FROM f_matches WHERE source_file = ?", [str(source_file)])
-        _delete_unreferenced_auto_teams(con, source_file)
         _ensure_teams_from_query(
             con,
             source_sql,
@@ -283,9 +282,11 @@ def load_historical_matches(
                 loaded_at = excluded.loaded_at
             """,
         )
+        _delete_unreferenced_auto_teams(con, source_file)
         rows_loaded = int(
-            con.execute("SELECT COUNT(*) FROM f_matches WHERE source_file = ?", [str(source_file)])
-            .fetchone()[0]
+            con.execute(
+                "SELECT COUNT(*) FROM f_matches WHERE source_file = ?", [str(source_file)]
+            ).fetchone()[0]
         )
 
     return LoadResult("historical_matches", source_file, rows_loaded)
@@ -1474,11 +1475,7 @@ def _resolve_transfermarkt_raw(raw_dir: Path, transfermarkt_raw: Path | None) ->
 
     transfermarkt_dir = raw_dir / "transfermarkt"
     candidates = sorted(
-        (
-            path
-            for path in transfermarkt_dir.glob("market_values_*.jsonl")
-            if path.is_file()
-        ),
+        (path for path in transfermarkt_dir.glob("market_values_*.jsonl") if path.is_file()),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -1667,6 +1664,21 @@ def _delete_unreferenced_auto_teams(con: duckdb.DuckDBPyConnection, source_file:
               SELECT 1
               FROM f_matches AS m
               WHERE m.home_team_id = t.team_id OR m.away_team_id = t.team_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM f_match_stats AS s
+              WHERE s.team_id = t.team_id OR s.opponent_team_id = t.team_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM d_squad_attributes AS a
+              WHERE a.team_id = t.team_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM d_squads AS q
+              WHERE q.team_id = t.team_id
           )
         """,
         [source_file_label],
