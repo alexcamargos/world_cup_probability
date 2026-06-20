@@ -30,7 +30,10 @@ DDL_STATEMENTS: tuple[str, ...] = (
         country VARCHAR,
         confederation VARCHAR,
         market_value_eur DOUBLE,
+        total_market_value_eur DOUBLE,
         market_value_currency VARCHAR,
+        market_value_source_url VARCHAR,
+        market_value_scraped_at TIMESTAMP,
         squad_size INTEGER,
         coach_name VARCHAR,
         source_file VARCHAR,
@@ -79,6 +82,51 @@ DDL_STATEMENTS: tuple[str, ...] = (
         loaded_at TIMESTAMP,
         FOREIGN KEY (home_team_id) REFERENCES d_teams(team_id),
         FOREIGN KEY (away_team_id) REFERENCES d_teams(team_id)
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS f_match_stats (
+        match_id VARCHAR NOT NULL,
+        match_date DATE NOT NULL,
+        team_id VARCHAR NOT NULL,
+        opponent_team_id VARCHAR,
+        tournament VARCHAR,
+        xg DOUBLE,
+        possession_pct DOUBLE,
+        source VARCHAR NOT NULL,
+        source_file VARCHAR,
+        loaded_at TIMESTAMP,
+        PRIMARY KEY (match_id, team_id, source),
+        FOREIGN KEY (team_id) REFERENCES d_teams(team_id)
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS d_squad_attributes (
+        team_id VARCHAR NOT NULL,
+        source_season VARCHAR NOT NULL,
+        avg_overall DOUBLE,
+        avg_pace DOUBLE,
+        avg_stamina DOUBLE,
+        sampled_player_count INTEGER,
+        source_dataset VARCHAR,
+        source_file VARCHAR,
+        loaded_at TIMESTAMP,
+        PRIMARY KEY (team_id, source_season),
+        FOREIGN KEY (team_id) REFERENCES d_teams(team_id)
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS data_collection_runs (
+        run_id VARCHAR PRIMARY KEY,
+        source_name VARCHAR NOT NULL,
+        source_kind VARCHAR NOT NULL,
+        status VARCHAR NOT NULL,
+        raw_path VARCHAR,
+        rows_loaded INTEGER,
+        cutoff_date DATE,
+        started_at TIMESTAMP NOT NULL,
+        finished_at TIMESTAMP NOT NULL,
+        error_message VARCHAR
     );
     """,
 )
@@ -203,8 +251,13 @@ MATCH_LOADER = TableLoader(
 TABLE_LOADERS: tuple[TableLoader, ...] = (TEAM_LOADER, SQUAD_LOADER, MATCH_LOADER)
 
 
-def initialize_database(db_path: Path = DB_PATH, raw_dir: Path = RAW_DIR) -> Path:
-    """Create the warehouse schema and load compatible raw inputs."""
+def initialize_database(
+    db_path: Path = DB_PATH,
+    raw_dir: Path = RAW_DIR,
+    *,
+    load_raw_files: bool = True,
+) -> Path:
+    """Create the warehouse schema and optionally load compatible raw inputs."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
@@ -215,13 +268,25 @@ def initialize_database(db_path: Path = DB_PATH, raw_dir: Path = RAW_DIR) -> Pat
 
     with duckdb.connect(str(db_path)) as con:
         _create_schema(con)
-        _load_raw_files(con, raw_dir)
+        _migrate_schema(con)
+        if load_raw_files:
+            _load_raw_files(con, raw_dir)
 
     return db_path
 
 
 def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
     for statement in DDL_STATEMENTS:
+        con.execute(statement)
+
+
+def _migrate_schema(con: duckdb.DuckDBPyConnection) -> None:
+    migration_statements = (
+        "ALTER TABLE d_teams ADD COLUMN IF NOT EXISTS total_market_value_eur DOUBLE",
+        "ALTER TABLE d_teams ADD COLUMN IF NOT EXISTS market_value_source_url VARCHAR",
+        "ALTER TABLE d_teams ADD COLUMN IF NOT EXISTS market_value_scraped_at TIMESTAMP",
+    )
+    for statement in migration_statements:
         con.execute(statement)
 
 
@@ -431,7 +496,10 @@ def _sql_type_for_column(column_name: str) -> str:
         "team_name": "VARCHAR",
         "confederation": "VARCHAR",
         "market_value_eur": "DOUBLE",
+        "total_market_value_eur": "DOUBLE",
         "market_value_currency": "VARCHAR",
+        "market_value_source_url": "VARCHAR",
+        "market_value_scraped_at": "TIMESTAMP",
         "squad_size": "INTEGER",
         "coach_name": "VARCHAR",
         "squad_id": "VARCHAR",
