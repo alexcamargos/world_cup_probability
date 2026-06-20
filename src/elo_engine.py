@@ -1,7 +1,8 @@
-"""Iterative classical Elo engine persisted in DuckDB.
+"""Iterative World Cup Probability Elo engine persisted in DuckDB.
 
-The engine reads ``f_matches`` in strict chronological order, updates Elo ratings
-match by match, and stores the full rating history in ``f_elo_history``.
+The engine reads ``f_matches`` in strict chronological order, updates World Cup
+Probability Elo ratings match by match, and stores the full rating history in
+``f_elo_history``.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "warehouse" / "world_cup.duckdb"
 
-INITIAL_ELO = 1500.0
+INITIAL_WORLD_CUP_PROBABILITY_ELO = 1500.0
 BASE_K_FACTOR = 20.0
 HOME_ADVANTAGE_POINTS = 100.0
 
@@ -55,7 +56,7 @@ class MatchRecord:
 
 
 def initialize_elo_history(db_path: Path = DB_PATH) -> None:
-    """Create the Elo history table if it does not exist."""
+    """Create the World Cup Probability Elo history table if it does not exist."""
     with duckdb.connect(str(db_path)) as con:
         con.execute(
             """
@@ -90,16 +91,16 @@ def initialize_elo_history(db_path: Path = DB_PATH) -> None:
 def build_elo_history(
     db_path: Path = DB_PATH,
     *,
-    initial_elo: float = INITIAL_ELO,
+    initial_world_cup_probability_elo: float = INITIAL_WORLD_CUP_PROBABILITY_ELO,
     base_k_factor: float = BASE_K_FACTOR,
     home_advantage_points: float = HOME_ADVANTAGE_POINTS,
 ) -> None:
-    """Iteratively compute Elo ratings and upsert them into DuckDB.
+    """Iteratively compute World Cup Probability Elo and upsert it into DuckDB.
 
     Args:
         db_path: Path to the local DuckDB warehouse.
-        initial_elo: Starting rating for unseen teams.
-        base_k_factor: Base learning rate for the Elo update.
+        initial_world_cup_probability_elo: Starting rating for unseen teams.
+        base_k_factor: Base learning rate for the World Cup Probability Elo update.
         home_advantage_points: Home-field advantage in Elo points.
     """
     logging.basicConfig(
@@ -115,8 +116,8 @@ def build_elo_history(
 
         LOGGER.info("Processing %d matches in strict chronological order.", len(matches))
         for match in matches:
-            home_before = ratings.get(match.home_team_id, initial_elo)
-            away_before = ratings.get(match.away_team_id, initial_elo)
+            home_before = ratings.get(match.home_team_id, initial_world_cup_probability_elo)
+            away_before = ratings.get(match.away_team_id, initial_world_cup_probability_elo)
 
             competition_weight = _competition_weight(match.competition)
             k_factor = base_k_factor * competition_weight
@@ -153,13 +154,13 @@ def build_elo_history(
                 neutral_site=neutral_site,
             )
 
-        LOGGER.info("Elo history updated successfully.")
+        LOGGER.info("World Cup Probability Elo history updated successfully.")
 
 
 def _ensure_matches_exist(con: duckdb.DuckDBPyConnection) -> None:
     count = con.execute("SELECT COUNT(*) FROM f_matches").fetchone()[0]
     if int(count) == 0:
-        LOGGER.warning("f_matches is empty. Elo history will not be generated.")
+        LOGGER.warning("f_matches is empty. World Cup Probability Elo will not be generated.")
 
 
 def _load_matches(con: duckdb.DuckDBPyConnection) -> list[MatchRecord]:
@@ -319,7 +320,7 @@ def _expected_score(rating_for: float, rating_against: float) -> float:
 
 
 def _actual_scores(home_score: int | None, away_score: int | None) -> tuple[float, float]:
-    """Convert the final score into Elo actual scores."""
+    """Convert the final score into World Cup Probability Elo actual scores."""
     if home_score is None or away_score is None:
         return 0.5, 0.5
 
