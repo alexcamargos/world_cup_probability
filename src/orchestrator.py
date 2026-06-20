@@ -1,7 +1,7 @@
 """Project orchestrator for the full World Cup pipeline.
 
 The execution order is:
-db_init -> elo_engine -> feature_pipeline -> model -> simulator
+db_init -> World Cup Probability Elo -> World Football Elo Ratings -> features -> model -> simulator
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ try:
         train_poisson_model,
     )
     from .simulator import TeamLambda, simulate_world_cup
+    from .world_football_elo_ratings import load_world_football_elo_ratings
 except ImportError:  # pragma: no cover - supports direct script execution.
     from analytics import export_analytics
     from db_init import initialize_database
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover - supports direct script execution.
         train_poisson_model,
     )
     from simulator import TeamLambda, simulate_world_cup
+    from world_football_elo_ratings import load_world_football_elo_ratings
 
 LOGGER = logging.getLogger(__name__)
 
@@ -124,22 +126,25 @@ def run_pipeline(
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
 
-    LOGGER.info("Step 1/6: initializing DuckDB warehouse.")
+    LOGGER.info("Step 1/7: initializing DuckDB warehouse.")
     initialize_database(db_path=config.db_path)
 
-    LOGGER.info("Step 2/6: building Elo history.")
+    LOGGER.info("Step 2/7: building World Cup Probability Elo history.")
     build_elo_history(db_path=config.db_path)
 
-    LOGGER.info("Step 3/6: building feature frame.")
+    LOGGER.info("Step 3/7: loading World Football Elo Ratings snapshot.")
+    load_world_football_elo_ratings(db_path=config.db_path)
+
+    LOGGER.info("Step 4/7: building feature frame.")
     feature_frame = build_feature_frame(db_path=config.db_path)
 
-    LOGGER.info("Step 4/6: training Poisson XGBoost model.")
+    LOGGER.info("Step 5/7: training Poisson XGBoost model.")
     X_train, X_valid, y_train, y_valid, feature_names = prepare_matrices(feature_frame)
     model = train_poisson_model(X_train, y_train, X_valid, y_valid)
     save_model(model, MODEL_PATH)
     explain_model(model, X_valid, feature_names, BEESWARM_PATH)
 
-    LOGGER.info("Step 5/6: building team lambdas and running Monte Carlo simulation.")
+    LOGGER.info("Step 6/7: building team lambdas and running Monte Carlo simulation.")
     team_lambdas = _build_team_lambdas(db_path=config.db_path, model=model)
     simulate_world_cup(
         team_lambdas,
@@ -149,7 +154,7 @@ def run_pipeline(
         seed=config.seed,
     )
 
-    LOGGER.info("Step 6/6: exporting analytical summaries.")
+    LOGGER.info("Step 7/7: exporting analytical summaries.")
     export_analytics(db_path=config.db_path)
 
     LOGGER.info("Pipeline completed successfully.")
@@ -166,7 +171,49 @@ def _build_team_lambdas(
     each team's attack intensity against the league-average reference point.
     """
     with duckdb.connect(str(db_path), read_only=True) as con:
-        query = """
+        has_world_football_elo_ratings = _world_football_elo_ratings_tables_available(con)
+        world_football_elo_ratings_cte = (
+            """
+            world_football_elo_ratings AS (
+                SELECT team_id, world_football_elo_ratings_now
+                FROM (
+                    SELECT
+                        a.team_alias AS team_id,
+                        r.elo_rating AS world_football_elo_ratings_now,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY a.team_alias_key
+                            ORDER BY r.rating_date DESC NULLS LAST, r.elo_rank ASC
+                        ) AS rn
+                    FROM d_world_football_elo_team_aliases AS a
+                    INNER JOIN d_world_football_elo_ratings AS r
+                        ON r.world_football_team_code = a.world_football_team_code
+                ) AS ranked_world_football_elo_ratings
+                WHERE rn = 1
+            ),
+            """
+            if has_world_football_elo_ratings
+            else ""
+        )
+        world_football_elo_ratings_select = (
+            "COALESCE(ee.world_football_elo_ratings_now, "
+            "le.world_cup_probability_elo_now, 1500.0) AS world_football_elo_ratings_now"
+            if has_world_football_elo_ratings
+            else (
+                "COALESCE(le.world_cup_probability_elo_now, 1500.0) "
+                "AS world_football_elo_ratings_now"
+            )
+        )
+        world_football_elo_ratings_join = (
+            """
+            LEFT JOIN world_football_elo_ratings AS ee
+                ON lower(ee.team_id) = lower(t.team_id)
+                OR regexp_replace(lower(ee.team_id), '[^a-z0-9]+', '', 'g')
+                    = regexp_replace(lower(t.team_id), '[^a-z0-9]+', '', 'g')
+            """
+            if has_world_football_elo_ratings
+            else ""
+        )
+        query = f"""
             WITH team_match_history AS (
                 SELECT
                     match_id,
@@ -184,12 +231,12 @@ def _build_team_lambdas(
                     home_team_score AS goals_against
                 FROM f_matches
             ),
-            latest_elo AS (
-                SELECT team_id, elo_now
+            latest_world_cup_probability_elo AS (
+                SELECT team_id, world_cup_probability_elo_now
                 FROM (
                     SELECT
                         team_id,
-                        elo_now,
+                        world_cup_probability_elo_now,
                         ROW_NUMBER() OVER (
                             PARTITION BY team_id
                             ORDER BY match_date DESC, match_id DESC
@@ -199,19 +246,20 @@ def _build_team_lambdas(
                             match_id,
                             match_date,
                             home_team_id AS team_id,
-                            home_rating_after AS elo_now
+                            home_rating_after AS world_cup_probability_elo_now
                         FROM f_elo_history
                         UNION ALL
                         SELECT
                             match_id,
                             match_date,
                             away_team_id AS team_id,
-                            away_rating_after AS elo_now
+                            away_rating_after AS world_cup_probability_elo_now
                         FROM f_elo_history
                     ) AS elo_union
                 ) AS ranked
                 WHERE rn = 1
             ),
+            {world_football_elo_ratings_cte}
             recent_form AS (
                 SELECT
                     team_id,
@@ -247,15 +295,17 @@ def _build_team_lambdas(
             SELECT
                 t.team_id,
                 t.team_name,
-                COALESCE(le.elo_now, 1500.0) AS elo_now,
+                COALESCE(le.world_cup_probability_elo_now, 1500.0) AS world_cup_probability_elo_now,
+                {world_football_elo_ratings_select},
                 COALESCE(t.market_value_eur, 0.0) AS market_value_eur,
                 COALESCE(lf.recent_form, 0.0) AS recent_form
             FROM d_teams AS t
-            LEFT JOIN latest_elo AS le
+            LEFT JOIN latest_world_cup_probability_elo AS le
                 ON le.team_id = t.team_id
+            {world_football_elo_ratings_join}
             LEFT JOIN latest_form AS lf
                 ON lf.team_id = t.team_id
-            ORDER BY elo_now DESC, market_value_eur DESC, team_name ASC
+            ORDER BY world_cup_probability_elo_now DESC, market_value_eur DESC, team_name ASC
         """
         team_frame = con.sql(query).pl()
 
@@ -267,16 +317,27 @@ def _build_team_lambdas(
 
     league_means = team_frame.select(
         [
-            pl.mean("elo_now").alias("elo_mean"),
+            pl.mean("world_cup_probability_elo_now").alias("world_cup_probability_elo_mean"),
+            pl.mean("world_football_elo_ratings_now").alias("world_football_elo_ratings_mean"),
             pl.mean("market_value_eur").alias("market_value_mean"),
             pl.mean("recent_form").alias("recent_form_mean"),
         ]
     ).row(0)
-    elo_mean, market_value_mean, recent_form_mean = map(float, league_means)
+    (
+        world_cup_probability_elo_mean,
+        world_football_elo_ratings_mean,
+        market_value_mean,
+        recent_form_mean,
+    ) = map(float, league_means)
 
     scored_frame = team_frame.with_columns(
         [
-            (pl.col("elo_now") - pl.lit(elo_mean)).alias("elo_diff"),
+            (
+                pl.col("world_cup_probability_elo_now") - pl.lit(world_cup_probability_elo_mean)
+            ).alias("world_cup_probability_elo_diff"),
+            (
+                pl.col("world_football_elo_ratings_now") - pl.lit(world_football_elo_ratings_mean)
+            ).alias("world_football_elo_ratings_diff"),
             (pl.col("market_value_eur") - pl.lit(market_value_mean)).alias("market_value_diff"),
             (pl.col("recent_form") - pl.lit(recent_form_mean)).alias("recent_form_diff"),
         ]
@@ -314,6 +375,22 @@ def _seed_bracket(team_frame: pl.DataFrame) -> pl.DataFrame:
         right -= 1
 
     return pl.DataFrame(bracket_rows)
+
+
+def _world_football_elo_ratings_tables_available(con: duckdb.DuckDBPyConnection) -> bool:
+    tables = ("d_world_football_elo_ratings", "d_world_football_elo_team_aliases")
+    return all(
+        con.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_name = ?
+            """,
+            [table],
+        ).fetchone()[0]
+        > 0
+        for table in tables
+    )
 
 
 def main() -> int:
