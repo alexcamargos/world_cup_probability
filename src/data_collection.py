@@ -161,8 +161,8 @@ def load_historical_matches(
         away_expr = f"CAST({_quote_identifier(away_col)} AS VARCHAR)"
         date_expr = f"CAST({_quote_identifier(date_col)} AS DATE)"
         tournament_expr = f"CAST({_quote_identifier(tournament_col)} AS VARCHAR)"
-        home_score_expr = f"CAST({_quote_identifier(home_score_col)} AS INTEGER)"
-        away_score_expr = f"CAST({_quote_identifier(away_score_col)} AS INTEGER)"
+        home_score_expr = f"TRY_CAST({_quote_identifier(home_score_col)} AS INTEGER)"
+        away_score_expr = f"TRY_CAST({_quote_identifier(away_score_col)} AS INTEGER)"
         neutral_expr = (
             f"CAST({_quote_identifier(neutral_col)} AS BOOLEAN)"
             if neutral_col is not None
@@ -179,10 +179,28 @@ def load_historical_matches(
             else "NULL::VARCHAR"
         )
         source_file_expr = _sql_string_literal(str(source_file))
+        valid_match_filter = (
+            f"{date_expr} >= {_sql_date_literal(cutoff_date)} "
+            f"AND {home_score_expr} IS NOT NULL "
+            f"AND {away_score_expr} IS NOT NULL"
+        )
 
-        _ensure_teams_from_query(con, source_sql, home_expr, source_file)
-        _ensure_teams_from_query(con, source_sql, away_expr, source_file)
         con.execute("DELETE FROM f_matches WHERE source_file = ?", [str(source_file)])
+        _delete_unreferenced_auto_teams(con, source_file)
+        _ensure_teams_from_query(
+            con,
+            source_sql,
+            home_expr,
+            source_file,
+            where_sql=valid_match_filter,
+        )
+        _ensure_teams_from_query(
+            con,
+            source_sql,
+            away_expr,
+            source_file,
+            where_sql=valid_match_filter,
+        )
         con.execute(
             f"""
             INSERT INTO f_matches (
@@ -232,7 +250,7 @@ def load_historical_matches(
                 {source_file_expr} AS source_file,
                 current_timestamp AS loaded_at
             FROM {source_sql}
-            WHERE {date_expr} >= ?
+            WHERE {valid_match_filter}
             ON CONFLICT (match_id) DO UPDATE SET
                 match_date = excluded.match_date,
                 competition = excluded.competition,
@@ -247,7 +265,6 @@ def load_historical_matches(
                 source_file = excluded.source_file,
                 loaded_at = excluded.loaded_at
             """,
-            [cutoff_date],
         )
         rows_loaded = int(
             con.execute("SELECT COUNT(*) FROM f_matches WHERE source_file = ?", [str(source_file)])
@@ -1007,7 +1024,12 @@ def _source_relation_sql(raw_file: Path) -> str:
     if raw_file.suffix.lower() == ".parquet":
         return f"read_parquet({file_path})"
     if raw_file.suffix.lower() == ".csv":
-        return f"read_csv_auto({file_path}, header=true)"
+        return (
+            "read_csv_auto("
+            f"{file_path}, header=true, nullstr=['', 'NA', 'N/A', 'NULL'], "
+            "sample_size=-1, ignore_errors=false"
+            ")"
+        )
     raise ValueError(f"Unsupported raw file extension: {raw_file.suffix}")
 
 
@@ -1038,8 +1060,11 @@ def _ensure_teams_from_query(
     source_sql: str,
     team_expression: str,
     source_file: Path,
+    *,
+    where_sql: str | None = None,
 ) -> None:
     source_file_expr = _sql_string_literal(f"{source_file}#auto-team")
+    filter_sql = f"AND {where_sql}" if where_sql is not None else ""
     con.execute(
         f"""
         INSERT INTO d_teams (
@@ -1073,8 +1098,25 @@ def _ensure_teams_from_query(
             current_timestamp AS loaded_at
         FROM {source_sql}
         WHERE {team_expression} IS NOT NULL
+          {filter_sql}
         ON CONFLICT (team_id) DO NOTHING
         """,
+    )
+
+
+def _delete_unreferenced_auto_teams(con: duckdb.DuckDBPyConnection, source_file: Path) -> None:
+    source_file_label = f"{source_file}#auto-team"
+    con.execute(
+        """
+        DELETE FROM d_teams AS t
+        WHERE t.source_file = ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM f_matches AS m
+              WHERE m.home_team_id = t.team_id OR m.away_team_id = t.team_id
+          )
+        """,
+        [source_file_label],
     )
 
 
@@ -1120,6 +1162,10 @@ def _quote_identifier(identifier: str) -> str:
 
 def _sql_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_date_literal(value: date) -> str:
+    return f"DATE {_sql_string_literal(value.isoformat())}"
 
 
 if __name__ == "__main__":
