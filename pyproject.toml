@@ -23,6 +23,8 @@ dependencies = [
 
 [project.scripts]
 collection = "src.data_collection:main"
+download-data = "src.data_collection:download_main"
+load-data = "src.data_collection:load_main"
 db-init = "src.db_init:main"
 elo = "src.elo_engine:main"
 features = "src.feature_pipeline:main"
