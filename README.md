@@ -7,25 +7,25 @@ Base do repositório para modelagem de probabilidades da Copa do Mundo.
 Ordem recomendada:
 
 1. Coletar e normalizar os dados reais usados pelo modelo:
-   - `uv run python -m src.data_collection --sources matches`
-   - `uv run python -m src.data_collection --sources matches --load-existing`
-   - `uv run python -m src.data_collection --sources squad --ea-fc-dataset <owner/dataset>`
-   - `uv run python -m src.data_collection --sources fbref --fbref-leagues <league> --fbref-seasons <season>`
-   - `uv run python -m src.data_collection --sources transfermarkt --transfermarkt-manifest data/raw/transfermarkt/teams.json`
+   - `uv run collection --sources matches`
+   - `uv run collection --sources matches --load-existing`
+   - `uv run collection --sources squad --ea-fc-dataset <owner/dataset>`
+   - `uv run collection --sources fbref --fbref-leagues <league> --fbref-seasons <season>`
+   - `uv run collection --sources transfermarkt --transfermarkt-manifest data/raw/transfermarkt/teams.json`
 2. Inicializar o warehouse e carregar dados brutos:
-   - `uv run python -m src.db_init`
+   - `uv run db-init`
 3. Calcular o histórico ELO:
-   - `uv run python -m src.elo_engine`
+   - `uv run elo`
 4. Gerar a base de features:
-   - `uv run python -m src.feature_pipeline`
+   - `uv run features`
 5. Treinar o modelo Poisson e gerar SHAP:
-   - `uv run python -m src.model`
+   - `uv run train-model`
 6. Rodar a simulação Monte Carlo:
-   - `uv run python -m src.simulator`
+   - `uv run simulate`
 7. Gerar as análises e CSVs:
-   - `uv run python -m src.analytics`
+   - `uv run analytics`
 8. Orquestrar tudo em sequência:
-   - `uv run python -m src.orchestrator --iterations 100000 --batch-size 2500`
+   - `uv run pipeline --iterations 100000 --batch-size 2500`
 
 Por regra de negócio, a coleta histórica carrega apenas partidas em ou após
 `2010-01-01`. O valor pode ser alterado manualmente com `--cutoff-date`.
