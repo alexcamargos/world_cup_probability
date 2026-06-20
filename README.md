@@ -27,17 +27,21 @@ Ordem recomendada:
    - `uv run collection --sources matches --load-existing`
 4. Inicializar o warehouse e carregar dados brutos:
    - `uv run db-init`
-5. Calcular o histórico ELO:
-   - `uv run elo`
-6. Gerar a base de features:
+5. Calcular o histórico World Cup Probability Elo:
+   - `uv run world-cup-probability-elo`
+6. Carregar o World Football Elo Ratings:
+   - `uv run world-football-elo-ratings`
+   - Para recarregar um snapshot local sem rede:
+     `uv run world-football-elo-ratings --load-existing --raw-path data/raw/eloratings/world_football_elo_ratings_snapshot.jsonl`
+7. Gerar a base de features:
    - `uv run features`
-7. Treinar o modelo Poisson e gerar SHAP:
+8. Treinar o modelo Poisson e gerar SHAP:
    - `uv run train-model`
-8. Rodar a simulação Monte Carlo:
+9. Rodar a simulação Monte Carlo:
    - `uv run simulate`
-9. Gerar as análises e CSVs:
+10. Gerar as análises e CSVs:
    - `uv run analytics`
-10. Orquestrar tudo em sequência:
+11. Orquestrar tudo em sequência:
    - `uv run pipeline --iterations 100000 --batch-size 2500`
 
 Por regra de negócio, a coleta histórica carrega apenas partidas em ou após
@@ -55,6 +59,15 @@ históricas do Kaggle, baixa o dataset padrão de atributos EA FC/FIFA e tenta
 Transfermarkt apenas se houver `config/transfermarkt_teams.json`. FBref fica
 como fonte opcional explícita porque o site costuma bloquear coleta automatizada
 com HTTP 403.
+
+O comando `world-football-elo-ratings` baixa o snapshot global atual de
+[World Football Elo Ratings](https://www.eloratings.net/) a partir dos TSVs
+públicos do site (`World.tsv` e `en.teams.tsv`) e persiste as tabelas
+`d_world_football_elo_ratings` e `d_world_football_elo_team_aliases`. A feature
+`world_football_elo_ratings_diff` entra no treino junto com
+`world_cup_probability_elo_diff`; se o snapshot ainda não estiver carregado, a
+geração de features usa o World Cup Probability Elo como fallback para manter o
+pipeline executável.
 
 Os manifestos padrão ficam em:
 
@@ -97,3 +110,6 @@ Manifesto Transfermarkt esperado:
 - Instale os hooks com `pre-commit install` e `pre-commit install --hook-type pre-push`
 - Os commits passam por `ruff format` e `ruff check --fix`
 - O `pytest` roda no `pre-push`
+
+
+
