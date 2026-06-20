@@ -4,13 +4,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from src.data_collection import (
     TransfermarktMarketValue,
+    download_kaggle_dataset,
     load_historical_matches,
     load_squad_attributes,
     parse_market_value_eur,
     persist_transfermarkt_market_values,
+    read_transfermarkt_manifest,
+    read_transfermarkt_raw,
+    write_transfermarkt_raw,
 )
 
 
@@ -121,3 +126,46 @@ def test_transfermarkt_parser_and_persistence(tmp_path: Path) -> None:
         ).fetchone()
 
     assert stored == (1_230_000_000.0, 1_230_000_000.0, "EUR")
+
+
+def test_transfermarkt_raw_round_trip(tmp_path: Path) -> None:
+    raw_path = tmp_path / "transfermarkt" / "market_values.jsonl"
+    expected = TransfermarktMarketValue(
+        team_id="Brazil",
+        team_name="Brazil",
+        total_market_value_eur=1_000_000.0,
+        source_url="https://www.transfermarkt.com/example",
+        scraped_at=datetime(2026, 6, 20, tzinfo=UTC),
+    )
+
+    write_transfermarkt_raw([expected], raw_path)
+    actual = read_transfermarkt_raw(raw_path)
+
+    assert actual == [expected]
+
+
+def test_transfermarkt_manifest_accepts_search_only_targets(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "transfermarkt_teams.json"
+    manifest_path.write_text(
+        """
+        {
+          "teams": [
+            {
+              "team_id": "Brazil",
+              "team_name": "Brazil"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    targets = read_transfermarkt_manifest(manifest_path)
+
+    assert targets[0].team_id == "Brazil"
+    assert targets[0].url is None
+
+
+def test_download_kaggle_dataset_rejects_placeholder_slug(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="not the README placeholder"):
+        download_kaggle_dataset("owner/dataset", tmp_path / "raw")
