@@ -116,6 +116,30 @@ DDL_STATEMENTS: tuple[str, ...] = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS d_world_football_elo_ratings (
+        world_football_team_code VARCHAR PRIMARY KEY,
+        team_name VARCHAR NOT NULL,
+        elo_rank INTEGER NOT NULL,
+        elo_rating DOUBLE NOT NULL,
+        rating_date DATE,
+        source_url VARCHAR,
+        source_file VARCHAR,
+        loaded_at TIMESTAMP
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS d_world_football_elo_team_aliases (
+        team_alias_key VARCHAR PRIMARY KEY,
+        team_alias VARCHAR NOT NULL,
+        normalized_team_alias VARCHAR NOT NULL,
+        world_football_team_code VARCHAR NOT NULL,
+        source_file VARCHAR,
+        loaded_at TIMESTAMP,
+        FOREIGN KEY (world_football_team_code)
+            REFERENCES d_world_football_elo_ratings(world_football_team_code)
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS data_collection_runs (
         run_id VARCHAR PRIMARY KEY,
         source_name VARCHAR NOT NULL,
