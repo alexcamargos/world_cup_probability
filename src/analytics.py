@@ -44,8 +44,20 @@ def export_analytics(db_path: Path = DB_PATH, output_dir: Path = EXPORT_DIR) -> 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with duckdb.connect(str(db_path), read_only=True) as con:
-        semifinal_df = con.sql("SELECT * FROM v_semifinal_reach ORDER BY semifinal_pct DESC, team_name ASC").pl()
-        title_df = con.sql("SELECT * FROM v_title_probability ORDER BY title_probability DESC, team_name ASC").pl()
+        semifinal_df = con.sql(
+            """
+            SELECT *
+            FROM v_semifinal_reach
+            ORDER BY semifinal_pct DESC, team_name ASC
+            """,
+        ).pl()
+        title_df = con.sql(
+            """
+            SELECT *
+            FROM v_title_probability
+            ORDER BY title_probability DESC, team_name ASC
+            """,
+        ).pl()
         final_matchup_df = con.sql("SELECT * FROM v_most_probable_final_matchup").pl()
 
     semifinal_path = output_dir / "semifinal_reach_probability.csv"
@@ -70,10 +82,24 @@ def build_analytics_frame(db_path: Path = DB_PATH) -> pl.DataFrame:
 
     with duckdb.connect(str(db_path), read_only=True) as con:
         semifinal_df = con.sql(
-            "SELECT 'semifinal_reach' AS metric, team_id, team_name, semifinal_pct AS value FROM v_semifinal_reach",
+            """
+            SELECT
+                'semifinal_reach' AS metric,
+                team_id,
+                team_name,
+                semifinal_pct AS value
+            FROM v_semifinal_reach
+            """,
         ).pl()
         title_df = con.sql(
-            "SELECT 'title_probability' AS metric, team_id, team_name, title_probability AS value FROM v_title_probability",
+            """
+            SELECT
+                'title_probability' AS metric,
+                team_id,
+                team_name,
+                title_probability AS value
+            FROM v_title_probability
+            """,
         ).pl()
         final_df = con.sql(
             """
@@ -175,10 +201,22 @@ def _view_final_matchup_sql() -> str:
     WITH finals AS (
         SELECT
             simulation_id,
-            LEAST(home_team_id, away_team_id) AS team_a_id,
-            GREATEST(home_team_id, away_team_id) AS team_b_id,
-            LEAST(home_team_name, away_team_name) AS team_a_name,
-            GREATEST(home_team_name, away_team_name) AS team_b_name
+            CASE
+                WHEN home_team_id <= away_team_id THEN home_team_id
+                ELSE away_team_id
+            END AS team_a_id,
+            CASE
+                WHEN home_team_id <= away_team_id THEN home_team_name
+                ELSE away_team_name
+            END AS team_a_name,
+            CASE
+                WHEN home_team_id <= away_team_id THEN away_team_id
+                ELSE home_team_id
+            END AS team_b_id,
+            CASE
+                WHEN home_team_id <= away_team_id THEN away_team_name
+                ELSE home_team_name
+            END AS team_b_name
         FROM simulated_results
         WHERE round_name = 'final'
     ),
@@ -206,7 +244,10 @@ def _view_final_matchup_sql() -> str:
         SELECT
             CONCAT(team_a_id, '_vs_', team_b_id) AS matchup_id,
             CONCAT(team_a_name, ' vs ', team_b_name) AS matchup_label,
-            ROUND(100.0 * matchup_count / NULLIF(ts.total_simulations, 0), 2) AS matchup_probability,
+            ROUND(
+                100.0 * matchup_count / NULLIF(ts.total_simulations, 0),
+                2
+            ) AS matchup_probability,
             matchup_count,
             ts.total_simulations,
             ROW_NUMBER() OVER (ORDER BY matchup_count DESC, team_a_name ASC, team_b_name ASC) AS rn
