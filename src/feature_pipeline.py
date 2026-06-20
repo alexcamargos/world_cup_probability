@@ -128,10 +128,9 @@ def _build_team_level_features(match_df: pl.DataFrame) -> pl.DataFrame:
     feature_df = matched.select(
         [
             (pl.col("team_elo_before") - pl.col("team_elo_before_away")).alias("elo_diff"),
-            (
-                pl.col("team_market_value_eur")
-                - pl.col("team_market_value_eur_away")
-            ).alias("market_value_diff"),
+            (pl.col("team_market_value_eur") - pl.col("team_market_value_eur_away")).alias(
+                "market_value_diff"
+            ),
             (pl.col("recent_form") - pl.col("recent_form_away")).alias("recent_form_diff"),
             pl.col("target"),
         ]
@@ -176,7 +175,7 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
             pl.col("home_market_value_eur").alias("opponent_market_value_eur"),
             pl.col("away_team_score").alias("goals_for"),
             pl.col("home_team_score").alias("goals_against"),
-            pl.col("home_team_score").alias("target"),
+            pl.col("away_team_score").alias("target"),
         ]
     )
 
@@ -204,9 +203,7 @@ def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
             .fill_null(0.0)
             .alias("goals_against_last5"),
         ]
-    ).with_columns(
-        (pl.col("goals_for_last5") - pl.col("goals_against_last5")).alias("recent_form")
-    )
+    ).with_columns((pl.col("goals_for_last5") - pl.col("goals_against_last5")).alias("recent_form"))
 
     return enriched.select(
         [
