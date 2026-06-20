@@ -22,7 +22,10 @@ import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, mean_poisson_deviance, r2_score
 from sklearn.model_selection import train_test_split
 
-from feature_pipeline import build_feature_frame
+try:
+    from .feature_pipeline import build_feature_frame
+except ImportError:  # pragma: no cover - supports direct script execution.
+    from feature_pipeline import build_feature_frame
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,11 +51,14 @@ class ModelArtifacts:
     beeswarm_path: Path
 
 
-def load_training_frame() -> pl.DataFrame:
+def load_training_frame(db_path: Path | None = None) -> pl.DataFrame:
     """Load and validate the training dataset."""
-    frame = build_feature_frame().drop_nulls()
+    frame = build_feature_frame() if db_path is None else build_feature_frame(db_path)
 
-    missing_columns = [column for column in (*FEATURE_COLUMNS, TARGET_COLUMN) if column not in frame.columns]
+    frame = frame.drop_nulls()
+    missing_columns = [
+        column for column in (*FEATURE_COLUMNS, TARGET_COLUMN) if column not in frame.columns
+    ]
     if missing_columns:
         raise RuntimeError(f"Training frame is missing columns: {', '.join(missing_columns)}")
 
@@ -62,7 +68,9 @@ def load_training_frame() -> pl.DataFrame:
     return frame
 
 
-def prepare_matrices(frame: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+def prepare_matrices(
+    frame: pl.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """Split the Polars frame into train and validation numpy matrices."""
     feature_frame = frame.select(list(FEATURE_COLUMNS))
     target = frame.get_column(TARGET_COLUMN).cast(pl.Float64)
@@ -153,7 +161,11 @@ def save_model(model: xgb.XGBRegressor, output_path: Path = MODEL_PATH) -> Path:
     return output_path
 
 
-def evaluate_model(model: xgb.XGBRegressor, X_valid: np.ndarray, y_valid: np.ndarray) -> dict[str, float]:
+def evaluate_model(
+    model: xgb.XGBRegressor,
+    X_valid: np.ndarray,
+    y_valid: np.ndarray,
+) -> dict[str, float]:
     """Compute validation metrics for the Poisson regressor."""
     y_pred = model.predict(X_valid)
     return {
@@ -163,14 +175,14 @@ def evaluate_model(model: xgb.XGBRegressor, X_valid: np.ndarray, y_valid: np.nda
     }
 
 
-def train_pipeline() -> ModelArtifacts:
+def train_pipeline(db_path: Path | None = None) -> ModelArtifacts:
     """Run the end-to-end training and interpretation pipeline."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
 
-    frame = load_training_frame()
+    frame = load_training_frame(db_path)
     LOGGER.info("Loaded training frame with shape %s", frame.shape)
 
     X_train, X_valid, y_train, y_valid, feature_names = prepare_matrices(frame)
