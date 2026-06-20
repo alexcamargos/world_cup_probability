@@ -6,29 +6,64 @@ Base do repositório para modelagem de probabilidades da Copa do Mundo.
 
 Ordem recomendada:
 
-1. Coletar e normalizar os dados reais usados pelo modelo:
+1. Baixar os dados brutos para `data/raw`:
+   - `uv run download-data`
+   - `uv run download-data --sources matches`
+   - `uv run download-data --sources matches squad --ea-fc-dataset flynn28/eafc26-player-database`
+   - `uv run download-data --sources fbref --fbref-leagues <league> --fbref-seasons <season>`
+   - `uv run download-data --sources transfermarkt --transfermarkt-manifest data/raw/transfermarkt/teams.json`
+   - Para baixar todas as fontes configuradas numa chamada:
+     `uv run download-data --ea-fc-dataset flynn28/eafc26-player-database --fbref-leagues <league> --fbref-seasons <season> --transfermarkt-manifest data/raw/transfermarkt/teams.json`
+2. Carregar os dados brutos no warehouse DuckDB:
+   - `uv run load-data`
+   - `uv run load-data --sources matches`
+   - `uv run load-data --sources matches squad --ea-fc-dataset flynn28/eafc26-player-database`
+   - `uv run load-data --sources fbref`
+   - `uv run load-data --sources transfermarkt`
+   - Para carregar todas as fontes já baixadas numa chamada:
+     `uv run load-data --ea-fc-dataset flynn28/eafc26-player-database`
+3. Coletar e carregar em um único comando, quando for conveniente:
    - `uv run collection --sources matches`
    - `uv run collection --sources matches --load-existing`
-   - `uv run collection --sources squad --ea-fc-dataset <owner/dataset>`
-   - `uv run collection --sources fbref --fbref-leagues <league> --fbref-seasons <season>`
-   - `uv run collection --sources transfermarkt --transfermarkt-manifest data/raw/transfermarkt/teams.json`
-2. Inicializar o warehouse e carregar dados brutos:
+4. Inicializar o warehouse e carregar dados brutos:
    - `uv run db-init`
-3. Calcular o histórico ELO:
+5. Calcular o histórico ELO:
    - `uv run elo`
-4. Gerar a base de features:
+6. Gerar a base de features:
    - `uv run features`
-5. Treinar o modelo Poisson e gerar SHAP:
+7. Treinar o modelo Poisson e gerar SHAP:
    - `uv run train-model`
-6. Rodar a simulação Monte Carlo:
+8. Rodar a simulação Monte Carlo:
    - `uv run simulate`
-7. Gerar as análises e CSVs:
+9. Gerar as análises e CSVs:
    - `uv run analytics`
-8. Orquestrar tudo em sequência:
+10. Orquestrar tudo em sequência:
    - `uv run pipeline --iterations 100000 --batch-size 2500`
 
 Por regra de negócio, a coleta histórica carrega apenas partidas em ou após
 `2010-01-01`. O valor pode ser alterado manualmente com `--cutoff-date`.
+
+O valor de `--ea-fc-dataset` deve ser um slug real do Kaggle, no formato
+`owner/dataset`, copiado da URL depois de `/datasets/`. Exemplos de datasets
+compatíveis para atributos de jogadores são `flynn28/eafc26-player-database`,
+`aniss7/fifa-player-data-from-sofifa-2025-06-03` e
+`rehandl23/fifa-24-player-stats-dataset`. A disponibilidade depende da licença
+e visibilidade do dataset na sua conta Kaggle.
+
+Sem argumentos, `download-data` usa os defaults do projeto: baixa partidas
+históricas do Kaggle, baixa o dataset padrão de atributos EA FC/FIFA e tenta
+Transfermarkt apenas se houver `config/transfermarkt_teams.json`. FBref fica
+como fonte opcional explícita porque o site costuma bloquear coleta automatizada
+com HTTP 403.
+
+Os manifestos padrão ficam em:
+
+- `config/fbref_sources.json`
+- `config/transfermarkt_teams.json`
+
+No manifesto do Transfermarkt, `url` é opcional. Quando ela não é informada, o
+download tenta resolver a página da seleção pela busca do Transfermarkt usando
+`team_name` ou `search_query`.
 
 Manifesto Transfermarkt esperado:
 
