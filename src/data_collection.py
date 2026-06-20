@@ -11,6 +11,8 @@ import argparse
 import json
 import logging
 import re
+import sys
+import time
 import zipfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -21,6 +23,7 @@ from uuid import uuid4
 
 import duckdb
 import httpx
+import requests
 from bs4 import BeautifulSoup
 
 try:
@@ -32,11 +35,20 @@ LOGGER = logging.getLogger(__name__)
 
 DATA_CUTOFF_DATE = date(2010, 1, 1)
 MATCH_RESULTS_DATASET = "martj42/international-football-results-from-1872-to-2017"
+DEFAULT_EA_FC_DATASET = "flynn28/eafc26-player-database"
+DEFAULT_FBREF_LEAGUES = ("INT-World Cup", "INT-European Championship")
+DEFAULT_FBREF_SEASONS = ("2010", "2014", "2018", "2022", "2024")
+PROJECT_ROOT = RAW_DIR.parents[1]
+DEFAULT_FBREF_MANIFEST = PROJECT_ROOT / "config" / "fbref_sources.json"
+DEFAULT_TRANSFERMARKT_MANIFEST = PROJECT_ROOT / "config" / "transfermarkt_teams.json"
 TRANSFERMARKT_USER_AGENT = (
     "Mozilla/5.0 (compatible; world-cup-probability-research/0.1; +https://localhost)"
 )
 
 TABULAR_SUFFIXES = {".csv", ".parquet"}
+ALL_COLLECTION_SOURCES = ("matches", "fbref", "squad", "transfermarkt")
+DEFAULT_DOWNLOAD_SOURCES = ("matches", "squad", "transfermarkt")
+DEFAULT_LOAD_SOURCES = ("matches", "squad", "transfermarkt")
 EURO_VALUE_PATTERN = re.compile(
     r"€\s*(?P<number>\d+(?:[.,]\d+)?)\s*(?P<unit>bn|m|k)?",
     re.IGNORECASE,
@@ -76,7 +88,8 @@ class TransfermarktTeamTarget:
 
     team_id: str
     team_name: str
-    url: str
+    url: str | None = None
+    search_query: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,16 +122,20 @@ def download_kaggle_dataset(
     Returns:
         The destination directory containing extracted source files.
     """
+    _validate_kaggle_dataset_slug(dataset)
     destination.mkdir(parents=True, exist_ok=True)
     kaggle_client = client if client is not None else _create_kaggle_client()
     kaggle_client.authenticate()
-    kaggle_client.dataset_download_files(
-        dataset,
-        path=str(destination),
-        force=force,
-        quiet=False,
-        unzip=True,
-    )
+    try:
+        kaggle_client.dataset_download_files(
+            dataset,
+            path=str(destination),
+            force=force,
+            quiet=False,
+            unzip=True,
+        )
+    except requests.exceptions.HTTPError as exc:
+        raise RuntimeError(_kaggle_download_error_message(dataset, exc)) from exc
     _extract_nested_archives(destination)
     return destination
 
@@ -457,7 +474,7 @@ def load_squad_attributes(
         source_root,
         required_alias_groups=(
             ("nationality", "nation", "team", "country"),
-            ("overall", "ova"),
+            ("overall", "ova", "ovr"),
         ),
     )
 
@@ -466,7 +483,7 @@ def load_squad_attributes(
         columns = _source_columns(con, source_file)
         lookup = _column_lookup(columns)
         team_col = _required_column(lookup, ("nationality", "nation", "team", "country"))
-        overall_col = _required_column(lookup, ("overall", "ova"))
+        overall_col = _required_column(lookup, ("overall", "ova", "ovr"))
         pace_col = _optional_column(lookup, ("pace", "pac"))
         stamina_col = _optional_column(lookup, ("stamina", "sta"))
 
@@ -563,7 +580,8 @@ def read_transfermarkt_manifest(path: Path) -> list[TransfermarktTeamTarget]:
             TransfermarktTeamTarget(
                 team_id=_read_manifest_str(raw_team, "team_id", index),
                 team_name=_read_manifest_str(raw_team, "team_name", index),
-                url=_read_manifest_str(raw_team, "url", index),
+                url=_read_optional_manifest_str(raw_team, "url"),
+                search_query=_read_optional_manifest_str(raw_team, "search_query"),
             )
         )
 
@@ -586,15 +604,15 @@ def scrape_transfermarkt_market_values(
     with httpx.Client(headers=headers, timeout=timeout_seconds, follow_redirects=True) as client:
         for target in targets:
             LOGGER.info("Scraping Transfermarkt market value for %s", target.team_name)
-            response = client.get(target.url)
-            response.raise_for_status()
+            source_url = target.url or _resolve_transfermarkt_team_url(client, target)
+            response = _transfermarkt_get(client, source_url)
             value = parse_market_value_eur(response.text)
             results.append(
                 TransfermarktMarketValue(
                     team_id=target.team_id,
                     team_name=target.team_name,
                     total_market_value_eur=value,
-                    source_url=target.url,
+                    source_url=source_url,
                     scraped_at=datetime.now(UTC),
                 )
             )
@@ -693,6 +711,229 @@ def write_transfermarkt_raw(
     return output_path
 
 
+def read_transfermarkt_raw(path: Path) -> list[TransfermarktMarketValue]:
+    """Read Transfermarkt JSON Lines produced by ``write_transfermarkt_raw``."""
+    values: list[TransfermarktMarketValue] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+            values.append(
+                TransfermarktMarketValue(
+                    team_id=_read_manifest_str(payload, "team_id", line_number),
+                    team_name=_read_manifest_str(payload, "team_name", line_number),
+                    total_market_value_eur=float(payload["total_market_value_eur"]),
+                    source_url=_read_manifest_str(payload, "source_url", line_number),
+                    scraped_at=datetime.fromisoformat(
+                        _read_manifest_str(payload, "scraped_at", line_number)
+                    ),
+                )
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Invalid Transfermarkt raw row at line {line_number}: {path}"
+            ) from exc
+    return values
+
+
+def run_downloads(args: argparse.Namespace) -> list[Path]:
+    """Download requested sources into ``data/raw`` without loading DuckDB."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    )
+    raw_dir = Path(args.raw_dir)
+    explicit_sources = args.sources is not None
+    requested_sources = set(args.sources or DEFAULT_DOWNLOAD_SOURCES)
+    downloaded_paths: list[Path] = []
+
+    if "matches" in requested_sources:
+        match_raw_dir = raw_dir / "kaggle" / _dataset_directory_name(MATCH_RESULTS_DATASET)
+        downloaded_paths.append(
+            download_kaggle_dataset(
+                MATCH_RESULTS_DATASET,
+                match_raw_dir,
+                force=args.force_download,
+            )
+        )
+
+    if "fbref" in requested_sources:
+        if not args.fbref_leagues or not args.fbref_seasons:
+            args.fbref_leagues, args.fbref_seasons = _resolve_fbref_defaults()
+        try:
+            downloaded_paths.extend(
+                fetch_fbref_with_soccerdata(
+                    leagues=args.fbref_leagues,
+                    seasons=args.fbref_seasons,
+                    raw_dir=raw_dir / "fbref",
+                    no_cache=args.fbref_no_cache,
+                )
+            )
+        except (
+            ConnectionError,
+            RuntimeError,
+            ValueError,
+            requests.exceptions.RequestException,
+        ) as exc:
+            if explicit_sources:
+                raise
+            LOGGER.warning(
+                "Skipping FBref download because the source is unavailable with the "
+                "default settings: %s",
+                exc,
+            )
+
+    if "squad" in requested_sources:
+        if not args.ea_fc_dataset:
+            args.ea_fc_dataset = DEFAULT_EA_FC_DATASET
+        squad_raw_dir = raw_dir / "kaggle" / _dataset_directory_name(args.ea_fc_dataset)
+        downloaded_paths.append(
+            download_kaggle_dataset(
+                args.ea_fc_dataset,
+                squad_raw_dir,
+                force=args.force_download,
+            )
+        )
+
+    if "transfermarkt" in requested_sources:
+        if args.transfermarkt_manifest is None:
+            args.transfermarkt_manifest = DEFAULT_TRANSFERMARKT_MANIFEST
+        if not Path(args.transfermarkt_manifest).exists():
+            if explicit_sources:
+                raise FileNotFoundError(
+                    f"Transfermarkt manifest not found: {args.transfermarkt_manifest}"
+                )
+            LOGGER.warning(
+                "Skipping Transfermarkt download because the default manifest does not exist: %s",
+                args.transfermarkt_manifest,
+            )
+            requested_sources.remove("transfermarkt")
+        else:
+            values = scrape_transfermarkt_market_values(
+                read_transfermarkt_manifest(Path(args.transfermarkt_manifest))
+            )
+            downloaded_paths.append(
+                write_transfermarkt_raw(
+                    values,
+                    raw_dir
+                    / "transfermarkt"
+                    / f"market_values_{datetime.now(UTC):%Y%m%dT%H%M%SZ}.jsonl",
+                )
+            )
+
+    for path in downloaded_paths:
+        LOGGER.info("Downloaded raw data to %s", path)
+    return downloaded_paths
+
+
+def run_loads(args: argparse.Namespace) -> list[LoadResult]:
+    """Load requested raw sources from ``data/raw`` into DuckDB."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    )
+    db_path = Path(args.db_path)
+    raw_dir = Path(args.raw_dir)
+    cutoff_date = date.fromisoformat(args.cutoff_date)
+    initialize_database(db_path=db_path, raw_dir=raw_dir, load_raw_files=False)
+
+    explicit_sources = args.sources is not None
+    requested_sources = set(args.sources or DEFAULT_LOAD_SOURCES)
+    results: list[LoadResult] = []
+
+    if "matches" in requested_sources:
+        match_raw_dir = raw_dir / "kaggle" / _dataset_directory_name(MATCH_RESULTS_DATASET)
+        results.append(
+            _run_load_step(
+                "historical_matches",
+                lambda: load_historical_matches(
+                    match_raw_dir,
+                    db_path=db_path,
+                    cutoff_date=cutoff_date,
+                ),
+                db_path,
+                cutoff_date,
+            )
+        )
+
+    if "fbref" in requested_sources:
+        try:
+            results.append(
+                _run_load_step(
+                    "fbref_match_stats",
+                    lambda: load_fbref_match_stats(
+                        raw_dir / "fbref",
+                        db_path=db_path,
+                        cutoff_date=cutoff_date,
+                    ),
+                    db_path,
+                    cutoff_date,
+                )
+            )
+        except FileNotFoundError as exc:
+            if explicit_sources:
+                raise
+            LOGGER.warning("Skipping FBref load because no raw stats are available: %s", exc)
+
+    if "squad" in requested_sources:
+        source_dataset_arg = args.ea_fc_dataset or DEFAULT_EA_FC_DATASET
+        try:
+            squad_raw_dir, source_dataset = _resolve_squad_source(raw_dir, source_dataset_arg)
+        except FileNotFoundError as exc:
+            if explicit_sources:
+                raise
+            LOGGER.warning(
+                "Skipping squad attributes load because no raw data is available: %s",
+                exc,
+            )
+        else:
+            results.append(
+                _run_load_step(
+                    "squad_attributes",
+                    lambda: load_squad_attributes(
+                        squad_raw_dir,
+                        db_path=db_path,
+                        source_season=args.squad_season,
+                        source_dataset=source_dataset,
+                    ),
+                    db_path,
+                    cutoff_date,
+                )
+            )
+
+    if "transfermarkt" in requested_sources:
+        try:
+            transfermarkt_raw = _resolve_transfermarkt_raw(raw_dir, args.transfermarkt_raw)
+        except FileNotFoundError as exc:
+            if explicit_sources:
+                raise
+            LOGGER.warning("Skipping Transfermarkt load because no raw data is available: %s", exc)
+        else:
+            transfermarkt_values = read_transfermarkt_raw(transfermarkt_raw)
+            results.append(
+                _run_load_step(
+                    "transfermarkt_market_values",
+                    lambda: persist_transfermarkt_market_values(
+                        transfermarkt_values,
+                        db_path=db_path,
+                        source_file=transfermarkt_raw,
+                    ),
+                    db_path,
+                    cutoff_date,
+                )
+            )
+
+    for result in results:
+        LOGGER.info(
+            "Loaded %s rows from %s into %s",
+            result.rows_loaded,
+            result.raw_path,
+            result.source_name,
+        )
+    return results
+
+
 def run_collection(args: argparse.Namespace) -> list[LoadResult]:
     """Run requested collectors and loaders from parsed CLI arguments."""
     logging.basicConfig(
@@ -748,7 +989,7 @@ def run_collection(args: argparse.Namespace) -> list[LoadResult]:
 
     if "squad" in requested_sources:
         if not args.ea_fc_dataset:
-            raise ValueError("--ea-fc-dataset is required when source 'squad' is selected.")
+            args.ea_fc_dataset = DEFAULT_EA_FC_DATASET
         squad_raw_dir = raw_dir / "kaggle" / _dataset_directory_name(args.ea_fc_dataset)
         if not args.load_existing:
             download_kaggle_dataset(args.ea_fc_dataset, squad_raw_dir, force=args.force_download)
@@ -809,7 +1050,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sources",
         nargs="+",
-        choices=("matches", "fbref", "squad", "transfermarkt"),
+        choices=ALL_COLLECTION_SOURCES,
         default=["matches"],
         help="Sources to collect/load.",
     )
@@ -865,10 +1106,124 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_download_parser() -> argparse.ArgumentParser:
+    """Build the raw data download command-line parser."""
+    parser = argparse.ArgumentParser(
+        description="Download all configured raw football datasets into data/raw.",
+    )
+    parser.add_argument(
+        "--sources",
+        nargs="+",
+        choices=ALL_COLLECTION_SOURCES,
+        default=None,
+        help="Sources to download. Defaults to the project ingestion defaults.",
+    )
+    parser.add_argument("--raw-dir", type=Path, default=RAW_DIR, help="Raw data directory.")
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Force Kaggle to redownload source files.",
+    )
+    parser.add_argument(
+        "--fbref-leagues",
+        nargs="*",
+        default=[],
+        help="soccerdata/FBref league aliases to collect.",
+    )
+    parser.add_argument(
+        "--fbref-seasons",
+        nargs="*",
+        default=[],
+        help="soccerdata/FBref seasons to collect.",
+    )
+    parser.add_argument(
+        "--fbref-no-cache",
+        action="store_true",
+        help="Disable soccerdata cache when fetching FBref data.",
+    )
+    parser.add_argument(
+        "--ea-fc-dataset",
+        default="",
+        help="Kaggle slug for the EA FC/FIFA player attributes dataset.",
+    )
+    parser.add_argument(
+        "--transfermarkt-manifest",
+        type=Path,
+        help="JSON file listing Transfermarkt team pages to scrape.",
+    )
+    return parser
+
+
+def build_load_parser() -> argparse.ArgumentParser:
+    """Build the raw-to-warehouse loading command-line parser."""
+    parser = argparse.ArgumentParser(
+        description="Load all configured raw football datasets into DuckDB.",
+    )
+    parser.add_argument(
+        "--sources",
+        nargs="+",
+        choices=ALL_COLLECTION_SOURCES,
+        default=None,
+        help="Sources to load. Defaults to the project ingestion defaults.",
+    )
+    parser.add_argument("--db-path", type=Path, default=DB_PATH, help="DuckDB warehouse path.")
+    parser.add_argument("--raw-dir", type=Path, default=RAW_DIR, help="Raw data directory.")
+    parser.add_argument(
+        "--cutoff-date",
+        default=DATA_CUTOFF_DATE.isoformat(),
+        help="Minimum match/stat date to load, in YYYY-MM-DD format.",
+    )
+    parser.add_argument(
+        "--ea-fc-dataset",
+        default="",
+        help=(
+            "Kaggle slug for the EA FC/FIFA player attributes dataset. If omitted, "
+            "load-data tries to infer the single compatible squad directory."
+        ),
+    )
+    parser.add_argument(
+        "--squad-season",
+        default="2025-2026",
+        help="Season label to store for aggregated squad attributes.",
+    )
+    parser.add_argument(
+        "--transfermarkt-raw",
+        type=Path,
+        help="Transfermarkt JSONL file to load. Defaults to the newest data/raw file.",
+    )
+    return parser
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint."""
     args = build_parser().parse_args(argv)
-    run_collection(args)
+    try:
+        run_collection(args)
+    except (FileNotFoundError, KeyError, RuntimeError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def download_main(argv: Sequence[str] | None = None) -> int:
+    """Download-only CLI entrypoint."""
+    args = build_download_parser().parse_args(argv)
+    try:
+        run_downloads(args)
+    except (FileNotFoundError, KeyError, RuntimeError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def load_main(argv: Sequence[str] | None = None) -> int:
+    """Load-only CLI entrypoint."""
+    args = build_load_parser().parse_args(argv)
+    try:
+        run_loads(args)
+    except (FileNotFoundError, KeyError, RuntimeError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -966,6 +1321,204 @@ def _create_kaggle_client() -> KaggleDatasetClient:
         raise RuntimeError("The Kaggle package is not installed.") from exc
 
     return KaggleApi()
+
+
+def _resolve_fbref_defaults() -> tuple[list[str], list[str]]:
+    if DEFAULT_FBREF_MANIFEST.exists():
+        payload = json.loads(DEFAULT_FBREF_MANIFEST.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"FBref manifest must be an object: {DEFAULT_FBREF_MANIFEST}")
+        leagues = payload.get("leagues")
+        seasons = payload.get("seasons")
+        if not isinstance(leagues, list) or not all(isinstance(item, str) for item in leagues):
+            raise ValueError("FBref manifest must contain a string list field: leagues")
+        if not isinstance(seasons, list) or not all(
+            isinstance(item, str | int) for item in seasons
+        ):
+            raise ValueError("FBref manifest must contain a string/integer list field: seasons")
+        return [str(item) for item in leagues], [str(item) for item in seasons]
+
+    return list(DEFAULT_FBREF_LEAGUES), list(DEFAULT_FBREF_SEASONS)
+
+
+def _resolve_transfermarkt_team_url(
+    client: httpx.Client,
+    target: TransfermarktTeamTarget,
+) -> str:
+    query = target.search_query or target.team_name
+    response = _transfermarkt_get(
+        client,
+        "https://www.transfermarkt.com/schnellsuche/ergebnis/schnellsuche",
+        params={"query": query},
+    )
+    soup = BeautifulSoup(response.text, "lxml")
+    candidates: list[tuple[str, str]] = []
+
+    for anchor in soup.select('a[href*="/startseite/verein/"]'):
+        label = anchor.get_text(" ", strip=True)
+        href = anchor.get("href")
+        if not label or not href or "vereinslos" in href or "unbekannt" in href:
+            continue
+        if re.search(r"\bU\d{2}\b|Olympic Team", label, flags=re.IGNORECASE):
+            continue
+        candidates.append((label, href))
+
+    expected_labels = {
+        target.team_name.casefold(),
+        target.team_id.casefold(),
+        query.casefold(),
+    }
+    for label, href in candidates:
+        if label.casefold() in expected_labels:
+            return _absolute_transfermarkt_url(href)
+
+    for label, href in candidates:
+        normalized_label = label.casefold()
+        if target.team_name.casefold() in normalized_label or query.casefold() in normalized_label:
+            return _absolute_transfermarkt_url(href)
+
+    if candidates:
+        label, href = candidates[0]
+        LOGGER.warning(
+            "Using first Transfermarkt search result for %s: %s",
+            target.team_name,
+            label,
+        )
+        return _absolute_transfermarkt_url(href)
+
+    raise ValueError(f"Could not resolve Transfermarkt URL for {target.team_name}.")
+
+
+def _transfermarkt_get(
+    client: httpx.Client,
+    url: str,
+    *,
+    params: Mapping[str, str] | None = None,
+    attempts: int = 3,
+) -> httpx.Response:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = client.get(url, params=params)
+            response.raise_for_status()
+            return response
+        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
+            last_error = exc
+            status_code = (
+                exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            )
+            if status_code is not None and status_code < 500 and status_code != 429:
+                break
+            if attempt < attempts:
+                time.sleep(float(attempt * 2))
+
+    raise RuntimeError(
+        f"Transfermarkt request failed after {attempts} attempts: {url}"
+    ) from last_error
+
+
+def _absolute_transfermarkt_url(href: str) -> str:
+    if href.startswith("http"):
+        return href
+    return f"https://www.transfermarkt.com{href}"
+
+
+def _resolve_squad_source(raw_dir: Path, dataset: str) -> tuple[Path, str]:
+    if dataset:
+        _validate_kaggle_dataset_slug(dataset)
+        return raw_dir / "kaggle" / _dataset_directory_name(dataset), dataset
+
+    kaggle_root = raw_dir / "kaggle"
+    if not kaggle_root.exists():
+        raise FileNotFoundError(
+            "No Kaggle raw directory found. Run download-data with --ea-fc-dataset first."
+        )
+
+    match_dir_name = _dataset_directory_name(MATCH_RESULTS_DATASET)
+    candidates: list[Path] = []
+    for path in sorted(candidate for candidate in kaggle_root.iterdir() if candidate.is_dir()):
+        if path.name == match_dir_name:
+            continue
+        try:
+            _find_tabular_file(
+                path,
+                required_alias_groups=(
+                    ("nationality", "nation", "team", "country"),
+                    ("overall", "ova", "ovr"),
+                ),
+            )
+        except FileNotFoundError:
+            continue
+        candidates.append(path)
+
+    if not candidates:
+        raise FileNotFoundError(
+            "No compatible EA FC/FIFA raw directory found. Pass --ea-fc-dataset "
+            "or run download-data for the squad source first."
+        )
+    if len(candidates) > 1:
+        labels = ", ".join(candidate.name for candidate in candidates)
+        raise ValueError(
+            "Multiple compatible squad datasets found. Pass --ea-fc-dataset to choose one: "
+            f"{labels}"
+        )
+
+    return candidates[0], candidates[0].name.replace("__", "/")
+
+
+def _resolve_transfermarkt_raw(raw_dir: Path, transfermarkt_raw: Path | None) -> Path:
+    if transfermarkt_raw is not None:
+        if not transfermarkt_raw.exists():
+            raise FileNotFoundError(f"Transfermarkt raw file not found: {transfermarkt_raw}")
+        return transfermarkt_raw
+
+    transfermarkt_dir = raw_dir / "transfermarkt"
+    candidates = sorted(
+        (
+            path
+            for path in transfermarkt_dir.glob("market_values_*.jsonl")
+            if path.is_file()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            "No Transfermarkt JSONL raw file found. Run download-data with "
+            "--transfermarkt-manifest first."
+        )
+    return candidates[0]
+
+
+def _validate_kaggle_dataset_slug(dataset: str) -> None:
+    if dataset in {"owner/dataset", "<owner/dataset>"}:
+        raise ValueError(
+            "--ea-fc-dataset must be a real Kaggle dataset slug, not the README "
+            "placeholder. Example: flynn28/eafc26-player-database"
+        )
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+", dataset):
+        raise ValueError(
+            "Kaggle dataset must use the '<owner>/<dataset>' format. "
+            "Open a Kaggle dataset page and copy the path after /datasets/."
+        )
+
+
+def _kaggle_download_error_message(dataset: str, exc: requests.exceptions.HTTPError) -> str:
+    status_code = exc.response.status_code if exc.response is not None else None
+    if status_code == 403:
+        return (
+            f"Kaggle refused access to dataset '{dataset}' with HTTP 403. "
+            "Check that the slug is real, your Kaggle credentials are active, "
+            "and your account can access the dataset page. If Kaggle shows terms "
+            "or a license prompt for that dataset, accept it in the browser first."
+        )
+    if status_code == 404:
+        return (
+            f"Kaggle dataset '{dataset}' was not found. Open the dataset page in "
+            "the browser and copy the '<owner>/<dataset>' slug from the URL."
+        )
+    return f"Failed to download Kaggle dataset '{dataset}': {exc}"
 
 
 def _write_soccerdata_frame(frame: object, output_path: Path) -> Path:
@@ -1144,6 +1697,15 @@ def _read_manifest_str(payload: Mapping[str, object], field_name: str, index: in
     value = payload.get(field_name)
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"Manifest team at index {index} needs non-empty '{field_name}'.")
+    return value.strip()
+
+
+def _read_optional_manifest_str(payload: Mapping[str, object], field_name: str) -> str | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Manifest field '{field_name}' must be a non-empty string.")
     return value.strip()
 
 
