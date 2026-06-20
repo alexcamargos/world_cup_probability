@@ -1,20 +1,21 @@
-"""Initialize the local DuckDB warehouse and load the first raw files.
+"""Initialize the local DuckDB warehouse and load raw files.
 
-This module creates a small star schema in ``data/warehouse/world_cup.duckdb``
-and loads any compatible files found under ``data/raw``.
-
-Parquet files are ingested with ``read_parquet()``. CSV files are supported as a
-fallback via ``read_csv_auto()`` so the bootstrap routine can accept either raw
-format.
+This module creates the DuckDB star schema in ``data/warehouse`` and ingests
+compatible CSV/Parquet files found under ``data/raw``. Each raw file is mapped
+through an explicit table loader so source validation and load ordering stay
+centralized.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import duckdb
+
+LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = PROJECT_ROOT / "data" / "raw"
@@ -82,105 +83,124 @@ DDL_STATEMENTS: tuple[str, ...] = (
     """,
 )
 
-TABLE_LOADERS: tuple["TableLoader", ...] = ()
+
+@dataclass(frozen=True, slots=True)
+class ColumnProjection:
+    """Map one warehouse column to accepted raw aliases."""
+
+    target_column: str
+    aliases: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class TableLoader:
-    """Describe how to project a raw file into a warehouse table."""
+    """Describe how to project a raw file into one warehouse table."""
 
     table_name: str
-    required_any: tuple[tuple[str, ...], ...]
-    column_map: tuple[tuple[str, tuple[str, ...], str], ...]
+    primary_key: str
+    required_alias_groups: tuple[tuple[str, ...], ...]
+    column_map: tuple[ColumnProjection, ...]
+
+    @property
+    def target_columns(self) -> tuple[str, ...]:
+        """Return target columns in insertion order."""
+        return tuple(projection.target_column for projection in self.column_map)
 
     def can_load(self, available_columns: set[str]) -> bool:
-        """Return whether the source has enough columns for this table."""
-        if self.required_any and not any(
+        """Return whether the source has all required alias groups."""
+        return all(
             any(alias in available_columns for alias in alias_group)
-            for alias_group in self.required_any
-        ):
-            return False
-
-        return True
+            for alias_group in self.required_alias_groups
+        )
 
 
-TABLE_LOADERS = (
-    TableLoader(
-        table_name="f_matches",
-        required_any=(
-            ("match_date", "date"),
-            ("home_team_id", "home_team"),
-            ("away_team_id", "away_team"),
-        ),
-        column_map=(
-            ("match_id", ("match_id", "id"), "CAST(coalesce(match_id, id) AS VARCHAR)"),
-            (
-                "match_date",
-                ("match_date", "date"),
-                "CAST(coalesce(match_date, date) AS DATE)",
-            ),
-            ("competition", ("competition", "tournament", "league"), "CAST(coalesce(competition, tournament, league) AS VARCHAR)"),
-            ("season", ("season", "year"), "CAST(coalesce(season, year) AS VARCHAR)"),
-            ("stage", ("stage", "round", "phase"), "CAST(coalesce(stage, round, phase) AS VARCHAR)"),
-            ("home_team_id", ("home_team_id", "home_team", "home"), "CAST(coalesce(home_team_id, home_team, home) AS VARCHAR)"),
-            ("away_team_id", ("away_team_id", "away_team", "away"), "CAST(coalesce(away_team_id, away_team, away) AS VARCHAR)"),
-            ("home_team_score", ("home_team_score", "home_score", "score_home", "goals_home"), "CAST(coalesce(home_team_score, home_score, score_home, goals_home) AS INTEGER)"),
-            ("away_team_score", ("away_team_score", "away_score", "score_away", "goals_away"), "CAST(coalesce(away_team_score, away_score, score_away, goals_away) AS INTEGER)"),
-            ("home_xg", ("home_xg",), "CAST(home_xg AS DOUBLE)"),
-            ("away_xg", ("away_xg",), "CAST(away_xg AS DOUBLE)"),
-            ("venue", ("venue", "stadium"), "CAST(coalesce(venue, stadium) AS VARCHAR)"),
-            ("city", ("city",), "CAST(city AS VARCHAR)"),
-            ("country", ("country",), "CAST(country AS VARCHAR)"),
-            ("attendance", ("attendance",), "CAST(attendance AS INTEGER)"),
-            ("neutral_site", ("neutral_site", "neutral"), "CAST(coalesce(neutral_site, neutral) AS BOOLEAN)"),
-            ("source_file", tuple(), "CAST(source_file AS VARCHAR)"),
-            ("loaded_at", tuple(), "current_timestamp"),
-        ),
+TEAM_LOADER = TableLoader(
+    table_name="d_teams",
+    primary_key="team_id",
+    required_alias_groups=(
+        ("team_id", "id", "club_id", "team_name", "team", "club", "name", "squad"),
     ),
-    TableLoader(
-        table_name="d_teams",
-        required_any=(
-            ("team_id", "team_name", "club", "squad"),
-            ("market_value_eur", "market_value", "squad_value"),
+    column_map=(
+        ColumnProjection(
+            "team_id", ("team_id", "id", "club_id", "team_name", "team", "club", "name", "squad")
         ),
-        column_map=(
-            ("team_id", ("team_id", "id", "club_id"), "CAST(coalesce(team_id, id, club_id) AS VARCHAR)"),
-            ("team_name", ("team_name", "team", "club", "name"), "CAST(coalesce(team_name, team, club, name) AS VARCHAR)"),
-            ("country", ("country", "nation"), "CAST(coalesce(country, nation) AS VARCHAR)"),
-            ("confederation", ("confederation",), "CAST(confederation AS VARCHAR)"),
-            ("market_value_eur", ("market_value_eur", "market_value", "squad_value"), "CAST(coalesce(market_value_eur, market_value, squad_value) AS DOUBLE)"),
-            ("market_value_currency", ("market_value_currency", "currency"), "CAST(coalesce(market_value_currency, currency) AS VARCHAR)"),
-            ("squad_size", ("squad_size", "players"), "CAST(coalesce(squad_size, players) AS INTEGER)"),
-            ("coach_name", ("coach_name", "manager"), "CAST(coalesce(coach_name, manager) AS VARCHAR)"),
-            ("source_file", tuple(), "CAST(source_file AS VARCHAR)"),
-            ("loaded_at", tuple(), "current_timestamp"),
+        ColumnProjection(
+            "team_name", ("team_name", "team", "club", "name", "squad", "team_id", "id", "club_id")
         ),
-    ),
-    TableLoader(
-        table_name="d_squads",
-        required_any=(
-            ("player_id", "player_name", "player"),
-            ("team_id", "team_name", "club"),
-        ),
-        column_map=(
-            ("squad_id", ("squad_id", "id"), "CAST(coalesce(squad_id, id) AS VARCHAR)"),
-            ("team_id", ("team_id", "team_name", "club"), "CAST(coalesce(team_id, team_name, club) AS VARCHAR)"),
-            ("player_id", ("player_id", "id_player"), "CAST(coalesce(player_id, id_player) AS VARCHAR)"),
-            ("player_name", ("player_name", "player", "name"), "CAST(coalesce(player_name, player, name) AS VARCHAR)"),
-            ("position", ("position", "role"), "CAST(coalesce(position, role) AS VARCHAR)"),
-            ("birth_date", ("birth_date", "dob", "date_of_birth"), "CAST(coalesce(birth_date, dob, date_of_birth) AS DATE)"),
-            ("age", ("age",), "CAST(age AS INTEGER)"),
-            ("nationality", ("nationality", "country"), "CAST(coalesce(nationality, country) AS VARCHAR)"),
-            ("height_cm", ("height_cm", "height"), "CAST(coalesce(height_cm, height) AS DOUBLE)"),
-            ("weight_kg", ("weight_kg", "weight"), "CAST(coalesce(weight_kg, weight) AS DOUBLE)"),
-            ("preferred_foot", ("preferred_foot", "foot"), "CAST(coalesce(preferred_foot, foot) AS VARCHAR)"),
-            ("market_value_eur", ("market_value_eur", "market_value"), "CAST(coalesce(market_value_eur, market_value) AS DOUBLE)"),
-            ("jersey_number", ("jersey_number", "shirt_number", "number"), "CAST(coalesce(jersey_number, shirt_number, number) AS INTEGER)"),
-            ("source_file", tuple(), "CAST(source_file AS VARCHAR)"),
-            ("loaded_at", tuple(), "current_timestamp"),
-        ),
+        ColumnProjection("country", ("country", "nation")),
+        ColumnProjection("confederation", ("confederation",)),
+        ColumnProjection("market_value_eur", ("market_value_eur", "market_value", "squad_value")),
+        ColumnProjection("market_value_currency", ("market_value_currency", "currency")),
+        ColumnProjection("squad_size", ("squad_size", "players")),
+        ColumnProjection("coach_name", ("coach_name", "manager")),
+        ColumnProjection("source_file", ()),
+        ColumnProjection("loaded_at", ()),
     ),
 )
+
+SQUAD_LOADER = TableLoader(
+    table_name="d_squads",
+    primary_key="squad_id",
+    required_alias_groups=(
+        ("player_id", "player_name", "player"),
+        ("team_id", "team_name", "club"),
+    ),
+    column_map=(
+        ColumnProjection("squad_id", ("squad_id", "id")),
+        ColumnProjection("team_id", ("team_id", "team_name", "club")),
+        ColumnProjection("player_id", ("player_id", "id_player")),
+        ColumnProjection(
+            "player_name", ("player_name", "player", "name", "player_id", "id_player")
+        ),
+        ColumnProjection("position", ("position", "role")),
+        ColumnProjection("birth_date", ("birth_date", "dob", "date_of_birth")),
+        ColumnProjection("age", ("age",)),
+        ColumnProjection("nationality", ("nationality", "country")),
+        ColumnProjection("height_cm", ("height_cm", "height")),
+        ColumnProjection("weight_kg", ("weight_kg", "weight")),
+        ColumnProjection("preferred_foot", ("preferred_foot", "foot")),
+        ColumnProjection("market_value_eur", ("market_value_eur", "market_value")),
+        ColumnProjection("jersey_number", ("jersey_number", "shirt_number", "number")),
+        ColumnProjection("source_file", ()),
+        ColumnProjection("loaded_at", ()),
+    ),
+)
+
+MATCH_LOADER = TableLoader(
+    table_name="f_matches",
+    primary_key="match_id",
+    required_alias_groups=(
+        ("match_date", "date"),
+        ("home_team_id", "home_team", "home"),
+        ("away_team_id", "away_team", "away"),
+    ),
+    column_map=(
+        ColumnProjection("match_id", ("match_id", "id")),
+        ColumnProjection("match_date", ("match_date", "date")),
+        ColumnProjection("competition", ("competition", "tournament", "league")),
+        ColumnProjection("season", ("season", "year")),
+        ColumnProjection("stage", ("stage", "round", "phase")),
+        ColumnProjection("home_team_id", ("home_team_id", "home_team", "home")),
+        ColumnProjection("away_team_id", ("away_team_id", "away_team", "away")),
+        ColumnProjection(
+            "home_team_score", ("home_team_score", "home_score", "score_home", "goals_home")
+        ),
+        ColumnProjection(
+            "away_team_score", ("away_team_score", "away_score", "score_away", "goals_away")
+        ),
+        ColumnProjection("home_xg", ("home_xg",)),
+        ColumnProjection("away_xg", ("away_xg",)),
+        ColumnProjection("venue", ("venue", "stadium")),
+        ColumnProjection("city", ("city",)),
+        ColumnProjection("country", ("country",)),
+        ColumnProjection("attendance", ("attendance",)),
+        ColumnProjection("neutral_site", ("neutral_site", "neutral")),
+        ColumnProjection("source_file", ()),
+        ColumnProjection("loaded_at", ()),
+    ),
+)
+
+TABLE_LOADERS: tuple[TableLoader, ...] = (TEAM_LOADER, SQUAD_LOADER, MATCH_LOADER)
 
 
 def initialize_database(db_path: Path = DB_PATH, raw_dir: Path = RAW_DIR) -> Path:
@@ -188,12 +208,14 @@ def initialize_database(db_path: Path = DB_PATH, raw_dir: Path = RAW_DIR) -> Pat
     db_path.parent.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    con = duckdb.connect(str(db_path))
-    try:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    )
+
+    with duckdb.connect(str(db_path)) as con:
         _create_schema(con)
         _load_raw_files(con, raw_dir)
-    finally:
-        con.close()
 
     return db_path
 
@@ -204,39 +226,62 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def _load_raw_files(con: duckdb.DuckDBPyConnection, raw_dir: Path) -> None:
-    raw_files = sorted(
-        path for path in raw_dir.rglob("*") if path.is_file() and path.suffix.lower() in {".parquet", ".csv"}
-    )
+    raw_files = _discover_raw_files(raw_dir)
 
-    for raw_file in raw_files:
-        columns = _read_source_columns(con, raw_file)
-        if not columns:
-            continue
+    for loader in TABLE_LOADERS:
+        for raw_file in raw_files:
+            columns = _read_source_columns(con, raw_file)
+            if not columns:
+                continue
 
-        available_columns = {column.lower() for column in columns}
-        source_sql = _source_sql(raw_file)
-        loaded_any_table = False
-
-        for loader in TABLE_LOADERS:
+            available_columns = {column.lower() for column in columns}
             if not loader.can_load(available_columns):
                 continue
 
-            select_list = _build_select_list(columns, loader, raw_file)
-            if select_list is None:
-                continue
+            _load_raw_file_into_table(con, raw_file, columns, loader)
 
-            con.execute(f"DELETE FROM {loader.table_name} WHERE source_file = ?", [str(raw_file)])
-            con.execute(
-                f"""
-                INSERT INTO {loader.table_name}
-                SELECT {select_list}
-                FROM {source_sql}
-                """,
-            )
-            loaded_any_table = True
 
-        if not loaded_any_table:
-            continue
+def _discover_raw_files(raw_dir: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in raw_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".parquet", ".csv"}
+    )
+
+
+def _load_raw_file_into_table(
+    con: duckdb.DuckDBPyConnection,
+    raw_file: Path,
+    columns: Iterable[str],
+    loader: TableLoader,
+) -> None:
+    source_sql = _source_sql(raw_file)
+    column_lookup = {column.lower(): column for column in columns}
+
+    if loader.table_name == "d_squads":
+        _ensure_teams_from_source(
+            con, source_sql, column_lookup, raw_file, ("team_id", "team_name", "club")
+        )
+    elif loader.table_name == "f_matches":
+        _ensure_teams_from_source(
+            con,
+            source_sql,
+            column_lookup,
+            raw_file,
+            ("home_team_id", "home_team", "home"),
+        )
+        _ensure_teams_from_source(
+            con,
+            source_sql,
+            column_lookup,
+            raw_file,
+            ("away_team_id", "away_team", "away"),
+        )
+
+    select_list = _build_select_list(column_lookup, loader, raw_file)
+    con.execute(f"DELETE FROM {loader.table_name} WHERE source_file = ?", [str(raw_file)])
+    con.execute(_insert_sql(loader, select_list, source_sql))
+    LOGGER.info("Loaded %s into %s.", raw_file, loader.table_name)
 
 
 def _read_source_columns(con: duckdb.DuckDBPyConnection, raw_file: Path) -> list[str]:
@@ -246,65 +291,122 @@ def _read_source_columns(con: duckdb.DuckDBPyConnection, raw_file: Path) -> list
 
 
 def _source_sql(raw_file: Path) -> str:
-    file_path = raw_file.as_posix().replace("'", "''")
+    file_path = _sql_string_literal(raw_file.as_posix())
     if raw_file.suffix.lower() == ".parquet":
-        return f"read_parquet('{file_path}')"
+        return f"read_parquet({file_path})"
     if raw_file.suffix.lower() == ".csv":
-        return f"read_csv_auto('{file_path}', header=true)"
+        return f"read_csv_auto({file_path}, header=true)"
     raise ValueError(f"Unsupported raw file extension: {raw_file.suffix}")
 
 
 def _build_select_list(
-    columns: Iterable[str],
+    column_lookup: dict[str, str],
     loader: TableLoader,
     raw_file: Path,
-) -> str | None:
-    column_lookup = {column.lower(): column for column in columns}
+) -> str:
     select_items: list[str] = []
 
-    for target_column, aliases, expression in loader.column_map:
-        if target_column == "source_file":
-            continue
-        if target_column == "loaded_at":
-            continue
-
-        if not aliases:
-            select_items.append(f"{expression} AS {target_column}")
-            continue
-
-        matching_alias = next((alias for alias in aliases if alias.lower() in column_lookup), None)
-        if matching_alias is None:
-            if target_column in {"source_file", "loaded_at"}:
-                select_items.append(f"{expression} AS {target_column}")
-            else:
-                select_items.append(f"NULL::{_sql_type_for_column(target_column)} AS {target_column}")
-            continue
-
-        resolved_name = column_lookup[matching_alias.lower()]
-        select_items.append(
-            f"CAST({_quote_identifier(resolved_name)} AS {_sql_type_for_column(target_column)}) AS {target_column}"
+    for projection in loader.column_map:
+        target_column = projection.target_column
+        expression = _projection_expression(
+            target_column, projection.aliases, column_lookup, raw_file
         )
+        select_items.append(f"{expression} AS {target_column}")
 
-    if not select_items:
+    return ", ".join(select_items)
+
+
+def _projection_expression(
+    target_column: str,
+    aliases: tuple[str, ...],
+    column_lookup: dict[str, str],
+    raw_file: Path,
+) -> str:
+    if target_column == "source_file":
+        return _sql_string_literal(str(raw_file))
+    if target_column == "loaded_at":
+        return "current_timestamp"
+
+    matching_alias = next((alias for alias in aliases if alias.lower() in column_lookup), None)
+    if matching_alias is None:
+        return _generated_or_null_expression(target_column, raw_file)
+
+    resolved_name = column_lookup[matching_alias.lower()]
+    return f"CAST({_quote_identifier(resolved_name)} AS {_sql_type_for_column(target_column)})"
+
+
+def _generated_or_null_expression(target_column: str, raw_file: Path) -> str:
+    if target_column in {"match_id", "squad_id"}:
+        source_literal = _sql_string_literal(str(raw_file))
+        return f"md5({source_literal} || ':' || CAST(row_number() OVER () AS VARCHAR))"
+    return f"NULL::{_sql_type_for_column(target_column)}"
+
+
+def _insert_sql(loader: TableLoader, select_list: str, source_sql: str) -> str:
+    columns = ", ".join(loader.target_columns)
+    updates = ", ".join(
+        f"{column} = excluded.{column}"
+        for column in loader.target_columns
+        if column != loader.primary_key
+    )
+    return f"""
+        INSERT INTO {loader.table_name} ({columns})
+        SELECT {select_list}
+        FROM {source_sql}
+        ON CONFLICT ({loader.primary_key}) DO UPDATE SET {updates}
+    """
+
+
+def _ensure_teams_from_source(
+    con: duckdb.DuckDBPyConnection,
+    source_sql: str,
+    column_lookup: dict[str, str],
+    raw_file: Path,
+    aliases: tuple[str, ...],
+) -> None:
+    team_column = _first_matching_column(column_lookup, aliases)
+    if team_column is None:
+        return
+
+    team_expression = f"CAST({_quote_identifier(team_column)} AS VARCHAR)"
+    source_file = _sql_string_literal(f"{raw_file}#auto-team")
+    con.execute(
+        f"""
+        INSERT INTO d_teams (
+            team_id,
+            team_name,
+            country,
+            confederation,
+            market_value_eur,
+            market_value_currency,
+            squad_size,
+            coach_name,
+            source_file,
+            loaded_at
+        )
+        SELECT DISTINCT
+            {team_expression} AS team_id,
+            {team_expression} AS team_name,
+            NULL::VARCHAR AS country,
+            NULL::VARCHAR AS confederation,
+            NULL::DOUBLE AS market_value_eur,
+            NULL::VARCHAR AS market_value_currency,
+            NULL::INTEGER AS squad_size,
+            NULL::VARCHAR AS coach_name,
+            {source_file} AS source_file,
+            current_timestamp AS loaded_at
+        FROM {source_sql}
+        WHERE {team_expression} IS NOT NULL
+        ON CONFLICT (team_id) DO NOTHING
+        """,
+    )
+
+
+def _first_matching_column(column_lookup: dict[str, str], aliases: tuple[str, ...]) -> str | None:
+    matching_alias = next((alias for alias in aliases if alias.lower() in column_lookup), None)
+    if matching_alias is None:
         return None
-
-    # The table-specific required-any check already filters weak matches; a
-    # fully padded projection keeps the star schema types strict.
-    select_items.append(f"CAST('{str(raw_file)}' AS VARCHAR) AS source_file")
-    select_items.append("current_timestamp AS loaded_at")
-    return ", ".join(_dedupe_selected_columns(select_items))
-
-
-def _dedupe_selected_columns(select_items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for item in select_items:
-        target_name = item.rsplit(" AS ", 1)[-1]
-        if target_name in seen:
-            continue
-        seen.add(target_name)
-        deduped.append(item)
-    return deduped
+    return column_lookup[matching_alias.lower()]
 
 
 def _sql_type_for_column(column_name: str) -> str:
@@ -354,10 +456,14 @@ def _quote_identifier(identifier: str) -> str:
     return f'"{escaped}"'
 
 
+def _sql_string_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def main() -> int:
     """Command-line entrypoint."""
     db_file = initialize_database()
-    print(f"DuckDB initialized at: {db_file}")
+    LOGGER.info("DuckDB initialized at: %s", db_file)
     return 0
 
 
