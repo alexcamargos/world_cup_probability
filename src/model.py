@@ -41,6 +41,10 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "fifa_world_ranking_points_diff",
     "fifa_world_ranking_rank_diff",
     "market_value_diff",
+    "avg_overall_diff",
+    "avg_pace_diff",
+    "avg_stamina_diff",
+    "squad_depth_proxy",
     "recent_form_diff",
 )
 TARGET_COLUMN = "target"
