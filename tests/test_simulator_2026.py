@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import duckdb
@@ -20,7 +21,12 @@ def test_world_cup_2026_schedule_contains_official_tournament_shape() -> None:
     assert fixtures[-1].round_name == "final"
 
 
-def test_simulate_world_cup_uses_groups_schedule_and_knockout_path(tmp_path: Path) -> None:
+def test_simulate_world_cup_uses_groups_schedule_and_knockout_path(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.INFO, logger="src.simulator")
+
     db_path = tmp_path / "world_cup.duckdb"
     teams = [
         TeamLambda(
@@ -62,3 +68,4 @@ def test_simulate_world_cup_uses_groups_schedule_and_knockout_path(tmp_path: Pat
     assert final_rows == 1
     assert mexico_opening == (2, 0, "Mexico City Stadium", True)
     assert rest_rows > 0
+    assert "Simulation progress: tournament 1/1 completed" in caplog.text
