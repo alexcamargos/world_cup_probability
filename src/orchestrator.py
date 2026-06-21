@@ -26,12 +26,19 @@ try:
     from .fifa_world_ranking import load_fifa_world_ranking
     from .model import (
         BEESWARM_PATH,
+        BEST_PARAMS_PATH,
+        DEFAULT_OPTUNA_TRIALS,
+        DEFAULT_VALIDATION_FRACTION,
         FEATURE_COLUMNS,
         MODEL_PATH,
+        evaluate_model,
         explain_model,
+        prepare_full_training_matrix,
         prepare_matrices,
+        save_json_artifact,
         save_model,
         train_poisson_model,
+        tune_poisson_hyperparameters,
     )
     from .settings import DB_PATH as WAREHOUSE_DB_PATH
     from .settings import DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED
@@ -48,12 +55,19 @@ except ImportError:  # pragma: no cover - supports direct script execution.
     from fifa_world_ranking import load_fifa_world_ranking
     from model import (
         BEESWARM_PATH,
+        BEST_PARAMS_PATH,
+        DEFAULT_OPTUNA_TRIALS,
+        DEFAULT_VALIDATION_FRACTION,
         FEATURE_COLUMNS,
         MODEL_PATH,
+        evaluate_model,
         explain_model,
+        prepare_full_training_matrix,
         prepare_matrices,
+        save_json_artifact,
         save_model,
         train_poisson_model,
+        tune_poisson_hyperparameters,
     )
     from settings import DB_PATH as WAREHOUSE_DB_PATH
     from settings import DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED
@@ -75,6 +89,10 @@ class PipelineConfig:
     iterations: int
     batch_size: int
     seed: int | None
+    tune_model: bool
+    optuna_trials: int
+    optuna_timeout_seconds: int | None
+    validation_fraction: float
 
     def validate(self) -> None:
         """Validate user-provided runtime values before work starts."""
@@ -82,6 +100,10 @@ class PipelineConfig:
             raise ValueError("iterations must be greater than zero.")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be greater than zero.")
+        if self.optuna_trials <= 0:
+            raise ValueError("optuna_trials must be greater than zero.")
+        if not 0.0 < self.validation_fraction < 1.0:
+            raise ValueError("validation_fraction must be greater than 0 and less than 1.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,6 +133,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=WAREHOUSE_DB_PATH,
         help="DuckDB warehouse path.",
     )
+    parser.add_argument(
+        "--tune-model",
+        action="store_true",
+        help="Tune model hyperparameters with Optuna before final training.",
+    )
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=DEFAULT_OPTUNA_TRIALS,
+        help="Number of Optuna trials when --tune-model is enabled.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=None,
+        help="Optional Optuna tuning timeout in seconds.",
+    )
+    parser.add_argument(
+        "--validation-fraction",
+        type=float,
+        default=DEFAULT_VALIDATION_FRACTION,
+        help="Most recent historical fraction used for temporal model validation.",
+    )
     return parser
 
 
@@ -120,6 +165,10 @@ def run_pipeline(
     iterations: int,
     batch_size: int,
     seed: int | None,
+    tune_model: bool = False,
+    optuna_trials: int = DEFAULT_OPTUNA_TRIALS,
+    optuna_timeout_seconds: int | None = None,
+    validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
 ) -> None:
     """Run the project end-to-end."""
     config = PipelineConfig(
@@ -127,6 +176,10 @@ def run_pipeline(
         iterations=iterations,
         batch_size=batch_size,
         seed=seed,
+        tune_model=tune_model,
+        optuna_trials=optuna_trials,
+        optuna_timeout_seconds=optuna_timeout_seconds,
+        validation_fraction=validation_fraction,
     )
     config.validate()
 
@@ -148,11 +201,39 @@ def run_pipeline(
     load_fifa_world_ranking(db_path=config.db_path)
 
     LOGGER.info("Step 5/8: building feature frame.")
-    feature_frame = build_feature_frame(db_path=config.db_path)
+    feature_frame = build_feature_frame(db_path=config.db_path, include_metadata=True)
 
     LOGGER.info("Step 6/8: training Poisson XGBoost model.")
-    X_train, X_valid, y_train, y_valid, feature_names = prepare_matrices(feature_frame)
-    model = train_poisson_model(X_train, y_train, X_valid, y_valid)
+    best_params = {}
+    if config.tune_model:
+        best_params = tune_poisson_hyperparameters(
+            feature_frame,
+            n_trials=config.optuna_trials,
+            timeout_seconds=config.optuna_timeout_seconds,
+            validation_fraction=config.validation_fraction,
+        )
+        save_json_artifact(best_params, BEST_PARAMS_PATH)
+
+    X_train, X_valid, y_train, y_valid, feature_names = prepare_matrices(
+        feature_frame,
+        validation_fraction=config.validation_fraction,
+    )
+    validation_model = train_poisson_model(
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
+        params=best_params,
+    )
+    metrics = evaluate_model(validation_model, X_valid, y_valid)
+    LOGGER.info(
+        "Validation metrics - MAE: %.4f | Poisson deviance: %.4f | R2: %.4f",
+        metrics["mae"],
+        metrics["poisson_deviance"],
+        metrics["r2"],
+    )
+    X_full, y_full, _ = prepare_full_training_matrix(feature_frame)
+    model = train_poisson_model(X_full, y_full, params=best_params)
     save_model(model, MODEL_PATH)
     explain_model(model, X_valid, feature_names, BEESWARM_PATH)
 
@@ -558,6 +639,10 @@ def main() -> int:
         iterations=args.iterations,
         batch_size=args.batch_size,
         seed=args.seed,
+        tune_model=args.tune_model,
+        optuna_trials=args.trials,
+        optuna_timeout_seconds=args.timeout_seconds,
+        validation_fraction=args.validation_fraction,
     )
     return 0
 
