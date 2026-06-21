@@ -100,11 +100,12 @@ e rank neutro para manter o pipeline executável.
 
 O comando `simulate` carrega `models/xgb_poisson_model.json`, lê o warehouse
 `data/warehouse/world_cup.duckdb`, monta as intensidades de gols das 48
-seleções oficiais da Copa de 2026 a partir das features do projeto e executa o
-formato real do torneio: 12 grupos de 4, 72 jogos de fase de grupos, melhores
+seleções oficiais da Copa de 2026 a partir das features do projeto e executa a
+tabela real do torneio: 12 grupos de 4, 72 jogos de fase de grupos, melhores
 oito terceiros colocados, fase de 32 avos, oitavas, quartas, semifinais, disputa
-de terceiro lugar e final. Placares reais já presentes na agenda do projeto são
-preservados; apenas partidas sem placar são simuladas.
+de terceiro lugar e final. A agenda real é o alvo da simulação; placares reais
+da Copa de 2026 não são usados no treino, no Elo, nas features, na forma recente
+ou como resultado preservado pelo simulador.
 
 Os manifestos padrão ficam em:
 
