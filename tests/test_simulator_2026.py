@@ -18,10 +18,12 @@ def test_world_cup_2026_schedule_contains_official_tournament_shape() -> None:
     assert fixtures[0].match_number == 1
     assert fixtures[0].home_slot == "MEX"
     assert fixtures[0].away_slot == "RSA"
+    assert fixtures[0].played_home_goals == 2
+    assert fixtures[0].played_away_goals == 0
     assert fixtures[-1].round_name == "final"
 
 
-def test_simulate_world_cup_uses_groups_schedule_and_knockout_path(
+def test_simulate_world_cup_uses_real_schedule_without_preserving_real_scores(
     tmp_path: Path,
     caplog,
 ) -> None:
@@ -32,7 +34,7 @@ def test_simulate_world_cup_uses_groups_schedule_and_knockout_path(
         TeamLambda(
             team_id=code,
             team_name=name,
-            lambda_goals=1.2,
+            lambda_goals=0.0,
             country_code=TEAM_COUNTRIES.get(code, code),
         )
         for code, name in TEAM_NAMES.items()
@@ -49,7 +51,7 @@ def test_simulate_world_cup_uses_groups_schedule_and_knockout_path(
             WHERE round_name = 'final'
             """
         ).fetchone()[0]
-        mexico_opening = con.execute(
+        opening_match = con.execute(
             """
             SELECT home_goals, away_goals, stadium, home_advantage
             FROM simulated_results
@@ -66,6 +68,6 @@ def test_simulate_world_cup_uses_groups_schedule_and_knockout_path(
 
     assert total_rows == 104
     assert final_rows == 1
-    assert mexico_opening == (2, 0, "Mexico City Stadium", True)
+    assert opening_match == (0, 0, "Mexico City Stadium", True)
     assert rest_rows > 0
     assert "Simulation progress: tournament 1/1 completed" in caplog.text
