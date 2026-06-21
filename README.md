@@ -43,10 +43,23 @@ Ordem recomendada:
    - `uv run train-model`
 10. Rodar a simulação Monte Carlo:
    - `uv run simulate`
+   - Exemplo reproduzível e menor para validação local:
+     `uv run simulate --iterations 1000 --batch-size 250 --seed 42`
+   - Para exportar os CSVs analíticos na mesma execução:
+     `uv run simulate --iterations 100000 --batch-size 2500 --export-analytics`
 11. Gerar as análises e CSVs:
    - `uv run analytics`
 12. Orquestrar tudo em sequência:
    - `uv run pipeline --iterations 100000 --batch-size 2500`
+13. Abrir a interface web Streamlit:
+   - `uv run dashboard`
+   - Alternativamente: `uv run streamlit run src/app.py`
+
+A interface web lê `data/warehouse/world_cup.duckdb`, permite selecionar a
+rodada da Copa e apresenta as probabilidades agregadas de vitória do Time 1,
+empate e vitória do Time 2 em uma tabela no formato do relatório. Para fases
+eliminatórias, os confrontos podem variar entre simulações; por padrão, a tela
+mostra o confronto mais frequente de cada jogo, com opção para exibir todos.
 
 Por regra de negócio, a coleta histórica carrega apenas partidas em ou após
 `2010-01-01`. O valor pode ser alterado manualmente com `--cutoff-date`.
@@ -84,6 +97,14 @@ treino junto com `world_cup_probability_elo_diff` e
 `world_football_elo_ratings_diff`; se o snapshot ainda não estiver carregado,
 a geração de features usa o World Cup Probability Elo como fallback para pontos
 e rank neutro para manter o pipeline executável.
+
+O comando `simulate` carrega `models/xgb_poisson_model.json`, lê o warehouse
+`data/warehouse/world_cup.duckdb`, monta as intensidades de gols das 48
+seleções oficiais da Copa de 2026 a partir das features do projeto e executa o
+formato real do torneio: 12 grupos de 4, 72 jogos de fase de grupos, melhores
+oito terceiros colocados, fase de 32 avos, oitavas, quartas, semifinais, disputa
+de terceiro lugar e final. Placares reais já presentes na agenda do projeto são
+preservados; apenas partidas sem placar são simuladas.
 
 Os manifestos padrão ficam em:
 
