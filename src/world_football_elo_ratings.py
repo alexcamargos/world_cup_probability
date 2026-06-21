@@ -315,11 +315,17 @@ def load_world_football_elo_ratings(
     db_path: Path = DB_PATH,
     raw_path: Path = DEFAULT_RAW_PATH,
     load_existing: bool = False,
+    force_download: bool = False,
     ratings_url: str = DEFAULT_WORLD_RATINGS_URL,
     team_dictionary_url: str = DEFAULT_TEAM_DICTIONARY_URL,
 ) -> int:
     """Fetch or read a snapshot, then persist it into DuckDB."""
-    if load_existing:
+    if load_existing or (raw_path.is_file() and raw_path.stat().st_size > 0 and not force_download):
+        if not load_existing:
+            LOGGER.info(
+                "Skipping World Football Elo Ratings download because raw data exists at %s",
+                raw_path,
+            )
         snapshot = read_world_football_elo_ratings_raw(raw_path)
     else:
         snapshot = fetch_world_football_elo_ratings_snapshot(
@@ -359,6 +365,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Load the existing JSONL snapshot instead of downloading a fresh one.",
     )
     parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Download a fresh snapshot even when the JSONL raw file already exists.",
+    )
+    parser.add_argument(
         "--ratings-url",
         default=DEFAULT_WORLD_RATINGS_URL,
         help="World Football Elo Ratings TSV URL.",
@@ -383,6 +394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             db_path=args.db_path,
             raw_path=args.raw_path,
             load_existing=args.load_existing,
+            force_download=args.force_download,
             ratings_url=args.ratings_url,
             team_dictionary_url=args.team_dictionary_url,
         )
