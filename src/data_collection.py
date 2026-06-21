@@ -42,14 +42,22 @@ MATCH_RESULTS_DATASET = "martj42/international-football-results-from-1872-to-201
 DEFAULT_EA_FC_DATASET = "flynn28/eafc26-player-database"
 DEFAULT_FBREF_LEAGUES = ("INT-World Cup", "INT-European Championship")
 DEFAULT_FBREF_SEASONS = ("2010", "2014", "2018", "2022", "2024")
+FJELSTUL_WORLDCUP_MATCHES_URL = (
+    "https://raw.githubusercontent.com/jfjelstul/worldcup/master/data-csv/matches.csv"
+)
+FJELSTUL_WORLDCUP_BOOKINGS_URL = (
+    "https://raw.githubusercontent.com/jfjelstul/worldcup/master/data-csv/bookings.csv"
+)
+FJELSTUL_WORLDCUP_RAW_FILENAME = "matches.csv"
+FJELSTUL_WORLDCUP_BOOKINGS_RAW_FILENAME = "bookings.csv"
 TRANSFERMARKT_USER_AGENT = (
     "Mozilla/5.0 (compatible; world-cup-probability-research/0.1; +https://localhost)"
 )
 
 TABULAR_SUFFIXES = {".csv", ".parquet"}
-ALL_COLLECTION_SOURCES = ("matches", "fbref", "squad", "transfermarkt")
-DEFAULT_DOWNLOAD_SOURCES = ("matches", "squad", "transfermarkt")
-DEFAULT_LOAD_SOURCES = ("matches", "squad", "transfermarkt")
+ALL_COLLECTION_SOURCES = ("matches", "fbref", "squad", "transfermarkt", "fjelstul")
+DEFAULT_DOWNLOAD_SOURCES = ("matches", "squad", "transfermarkt", "fjelstul")
+DEFAULT_LOAD_SOURCES = ("matches", "squad", "transfermarkt", "fjelstul")
 EURO_VALUE_PATTERN = re.compile(
     r"€\s*(?P<number>\d+(?:[.,]\d+)?)\s*(?P<unit>bn|m|k)?",
     re.IGNORECASE,
@@ -580,6 +588,412 @@ def load_squad_attributes(
     return LoadResult("squad_attributes", source_file, rows_loaded)
 
 
+def download_fjelstul_worldcup_matches(
+    destination: Path,
+    *,
+    force: bool = False,
+) -> Path:
+    """Download the Fjelstul World Cup CSVs used by the project."""
+    destination.mkdir(parents=True, exist_ok=True)
+
+    for url, filename in (
+        (FJELSTUL_WORLDCUP_MATCHES_URL, FJELSTUL_WORLDCUP_RAW_FILENAME),
+        (FJELSTUL_WORLDCUP_BOOKINGS_URL, FJELSTUL_WORLDCUP_BOOKINGS_RAW_FILENAME),
+    ):
+        target_path = destination / filename
+        if target_path.exists() and target_path.stat().st_size > 0 and not force:
+            LOGGER.info(
+                "Skipping Fjelstul World Cup download because %s already exists",
+                target_path,
+            )
+            continue
+
+        try:
+            response = httpx.get(
+                url,
+                timeout=30.0,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+        except (httpx.HTTPError, httpx.TimeoutException) as exc:
+            raise RuntimeError(f"Failed to download Fjelstul World Cup file: {filename}") from exc
+        target_path.write_bytes(response.content)
+
+    return destination
+
+
+def load_fjelstul_world_cup_history(
+    source_root: Path,
+    *,
+    db_path: Path = DB_PATH,
+) -> LoadResult:
+    """Load temporally safe prior World Cup history features from Fjelstul matches."""
+    initialize_database(db_path=db_path, load_raw_files=False)
+    source_file = (
+        source_root
+        if source_root.is_file()
+        else _find_tabular_file(
+            source_root,
+            required_alias_groups=(
+                ("tournament_id",),
+                ("tournament_name",),
+                ("match_date",),
+                ("home_team_id",),
+                ("home_team_name",),
+                ("away_team_id",),
+                ("away_team_name",),
+                ("home_team_score",),
+                ("away_team_score",),
+            ),
+        )
+    )
+    bookings_file = _resolve_optional_fjelstul_bookings_raw(source_root)
+
+    with duckdb.connect(str(db_path)) as con:
+        source_sql = _source_relation_sql(source_file)
+        columns = _source_columns(con, source_file)
+        lookup = _column_lookup(columns)
+        tournament_id_col = _required_column(lookup, ("tournament_id",))
+        tournament_name_col = _required_column(lookup, ("tournament_name",))
+        match_date_col = _required_column(lookup, ("match_date",))
+        home_team_id_col = _required_column(lookup, ("home_team_id",))
+        home_team_name_col = _required_column(lookup, ("home_team_name",))
+        home_team_code_col = _optional_column(lookup, ("home_team_code",))
+        away_team_id_col = _required_column(lookup, ("away_team_id",))
+        away_team_name_col = _required_column(lookup, ("away_team_name",))
+        away_team_code_col = _optional_column(lookup, ("away_team_code",))
+        home_score_col = _required_column(lookup, ("home_team_score",))
+        away_score_col = _required_column(lookup, ("away_team_score",))
+
+        tournament_id_expr = f"CAST({_quote_identifier(tournament_id_col)} AS VARCHAR)"
+        tournament_name_expr = f"CAST({_quote_identifier(tournament_name_col)} AS VARCHAR)"
+        match_date_expr = f"CAST({_quote_identifier(match_date_col)} AS DATE)"
+        home_team_id_expr = f"CAST({_quote_identifier(home_team_id_col)} AS VARCHAR)"
+        home_team_name_expr = f"CAST({_quote_identifier(home_team_name_col)} AS VARCHAR)"
+        home_team_code_expr = (
+            f"CAST({_quote_identifier(home_team_code_col)} AS VARCHAR)"
+            if home_team_code_col is not None
+            else "NULL::VARCHAR"
+        )
+        away_team_id_expr = f"CAST({_quote_identifier(away_team_id_col)} AS VARCHAR)"
+        away_team_name_expr = f"CAST({_quote_identifier(away_team_name_col)} AS VARCHAR)"
+        away_team_code_expr = (
+            f"CAST({_quote_identifier(away_team_code_col)} AS VARCHAR)"
+            if away_team_code_col is not None
+            else "NULL::VARCHAR"
+        )
+        home_score_expr = f"TRY_CAST({_quote_identifier(home_score_col)} AS INTEGER)"
+        away_score_expr = f"TRY_CAST({_quote_identifier(away_score_col)} AS INTEGER)"
+        source_file_expr = _sql_string_literal(str(source_file))
+        max_as_of_year = max(date.today().year + 4, 2026)
+
+        con.execute("DELETE FROM d_world_cup_prior_team_history")
+        con.execute(
+            f"""
+            INSERT INTO d_world_cup_prior_team_history (
+                team_id,
+                team_name,
+                team_code,
+                normalized_team_name,
+                as_of_year,
+                prior_world_cup_appearances,
+                prior_world_cup_points_per_match,
+                prior_world_cup_goal_diff_per_match,
+                source_file,
+                loaded_at
+            )
+            WITH raw_matches AS (
+                SELECT
+                    {tournament_id_expr} AS tournament_id,
+                    {tournament_name_expr} AS tournament_name,
+                    {match_date_expr} AS match_date,
+                    CAST(EXTRACT(year FROM {match_date_expr}) AS INTEGER) AS tournament_year,
+                    {home_team_id_expr} AS home_team_id,
+                    {home_team_name_expr} AS home_team_name,
+                    {home_team_code_expr} AS home_team_code,
+                    {away_team_id_expr} AS away_team_id,
+                    {away_team_name_expr} AS away_team_name,
+                    {away_team_code_expr} AS away_team_code,
+                    {home_score_expr} AS home_team_score,
+                    {away_score_expr} AS away_team_score
+                FROM {source_sql}
+                WHERE LOWER({tournament_name_expr}) LIKE '%men''s world cup%'
+                  AND {home_score_expr} IS NOT NULL
+                  AND {away_score_expr} IS NOT NULL
+            ),
+            team_matches AS (
+                SELECT
+                    tournament_id,
+                    tournament_year,
+                    home_team_id AS team_id,
+                    home_team_name AS team_name,
+                    home_team_code AS team_code,
+                    1 AS played,
+                    CASE
+                        WHEN home_team_score > away_team_score THEN 3
+                        WHEN home_team_score = away_team_score THEN 1
+                        ELSE 0
+                    END AS points,
+                    home_team_score - away_team_score AS goal_difference
+                FROM raw_matches
+                UNION ALL
+                SELECT
+                    tournament_id,
+                    tournament_year,
+                    away_team_id AS team_id,
+                    away_team_name AS team_name,
+                    away_team_code AS team_code,
+                    1 AS played,
+                    CASE
+                        WHEN away_team_score > home_team_score THEN 3
+                        WHEN away_team_score = home_team_score THEN 1
+                        ELSE 0
+                    END AS points,
+                    away_team_score - home_team_score AS goal_difference
+                FROM raw_matches
+            ),
+            team_tournament_stats AS (
+                SELECT
+                    team_id,
+                    ANY_VALUE(team_name) AS team_name,
+                    ANY_VALUE(team_code) AS team_code,
+                    tournament_id,
+                    tournament_year,
+                    SUM(played) AS played,
+                    SUM(points) AS points,
+                    SUM(goal_difference) AS goal_difference
+                FROM team_matches
+                GROUP BY team_id, tournament_id, tournament_year
+            ),
+            teams AS (
+                SELECT
+                    team_id,
+                    ARG_MAX(team_name, tournament_year) AS team_name,
+                    ARG_MAX(team_code, tournament_year) AS team_code
+                FROM team_tournament_stats
+                GROUP BY team_id
+            ),
+            year_bounds AS (
+                SELECT
+                    MIN(tournament_year) AS min_year,
+                    GREATEST(MAX(tournament_year) + 4, ?::INTEGER) AS max_year
+                FROM team_tournament_stats
+            ),
+            team_year_grid AS (
+                SELECT
+                    teams.team_id,
+                    teams.team_name,
+                    teams.team_code,
+                    years.as_of_year
+                FROM teams
+                CROSS JOIN year_bounds
+                CROSS JOIN generate_series(
+                    year_bounds.min_year,
+                    year_bounds.max_year
+                ) AS years(as_of_year)
+            )
+            SELECT
+                grid.team_id,
+                grid.team_name,
+                grid.team_code,
+                regexp_replace(lower(grid.team_name), '[^a-z0-9]+', '', 'g')
+                    AS normalized_team_name,
+                CAST(grid.as_of_year AS INTEGER) AS as_of_year,
+                COUNT(stats.tournament_id)::INTEGER AS prior_world_cup_appearances,
+                COALESCE(
+                    SUM(stats.points)::DOUBLE / NULLIF(SUM(stats.played), 0),
+                    0.0
+                ) AS prior_world_cup_points_per_match,
+                COALESCE(
+                    SUM(stats.goal_difference)::DOUBLE / NULLIF(SUM(stats.played), 0),
+                    0.0
+                ) AS prior_world_cup_goal_diff_per_match,
+                {source_file_expr} AS source_file,
+                current_timestamp AS loaded_at
+            FROM team_year_grid AS grid
+            LEFT JOIN team_tournament_stats AS stats
+                ON stats.team_id = grid.team_id
+                AND stats.tournament_year < grid.as_of_year
+            GROUP BY grid.team_id, grid.team_name, grid.team_code, grid.as_of_year
+            """,
+            [max_as_of_year],
+        )
+        rows_loaded = int(
+            con.execute("SELECT COUNT(*) FROM d_world_cup_prior_team_history").fetchone()[0]
+        )
+        if bookings_file is not None:
+            _load_fjelstul_world_cup_discipline_history(
+                con,
+                matches_source_file=source_file,
+                bookings_source_file=bookings_file,
+            )
+
+    return LoadResult("fjelstul_world_cup_history", source_file, rows_loaded)
+
+
+def _load_fjelstul_world_cup_discipline_history(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    matches_source_file: Path,
+    bookings_source_file: Path,
+) -> None:
+    matches_sql = _source_relation_sql(matches_source_file)
+    bookings_sql = _source_relation_sql(bookings_source_file)
+    source_file_expr = _sql_string_literal(str(bookings_source_file))
+    con.execute("DELETE FROM d_world_cup_prior_discipline_history")
+    con.execute(
+        f"""
+        INSERT INTO d_world_cup_prior_discipline_history (
+            team_id,
+            team_name,
+            team_code,
+            normalized_team_name,
+            as_of_year,
+            prior_world_cup_yellow_cards_per_match,
+            prior_world_cup_sending_offs_per_match,
+            prior_world_cup_fair_play_penalty_per_match,
+            source_file,
+            loaded_at
+        )
+        WITH raw_matches AS (
+            SELECT
+                CAST(tournament_id AS VARCHAR) AS tournament_id,
+                CAST(tournament_name AS VARCHAR) AS tournament_name,
+                CAST(match_date AS DATE) AS match_date,
+                CAST(EXTRACT(year FROM CAST(match_date AS DATE)) AS INTEGER) AS tournament_year,
+                CAST(home_team_id AS VARCHAR) AS home_team_id,
+                CAST(home_team_name AS VARCHAR) AS home_team_name,
+                CAST(home_team_code AS VARCHAR) AS home_team_code,
+                CAST(away_team_id AS VARCHAR) AS away_team_id,
+                CAST(away_team_name AS VARCHAR) AS away_team_name,
+                CAST(away_team_code AS VARCHAR) AS away_team_code
+            FROM {matches_sql}
+            WHERE LOWER(CAST(tournament_name AS VARCHAR)) LIKE '%men''s world cup%'
+        ),
+        team_matches AS (
+            SELECT
+                tournament_id,
+                tournament_year,
+                home_team_id AS team_id,
+                home_team_name AS team_name,
+                home_team_code AS team_code,
+                1 AS played
+            FROM raw_matches
+            UNION ALL
+            SELECT
+                tournament_id,
+                tournament_year,
+                away_team_id AS team_id,
+                away_team_name AS team_name,
+                away_team_code AS team_code,
+                1 AS played
+            FROM raw_matches
+        ),
+        team_tournament_matches AS (
+            SELECT
+                team_id,
+                ANY_VALUE(team_name) AS team_name,
+                ANY_VALUE(team_code) AS team_code,
+                tournament_id,
+                tournament_year,
+                SUM(played) AS played
+            FROM team_matches
+            GROUP BY team_id, tournament_id, tournament_year
+        ),
+        raw_bookings AS (
+            SELECT
+                CAST(tournament_id AS VARCHAR) AS tournament_id,
+                CAST(team_id AS VARCHAR) AS team_id,
+                TRY_CAST(yellow_card AS INTEGER) AS yellow_card,
+                TRY_CAST(red_card AS INTEGER) AS red_card,
+                TRY_CAST(second_yellow_card AS INTEGER) AS second_yellow_card,
+                TRY_CAST(sending_off AS INTEGER) AS sending_off
+            FROM {bookings_sql}
+            WHERE LOWER(CAST(tournament_name AS VARCHAR)) LIKE '%men''s world cup%'
+        ),
+        team_tournament_bookings AS (
+            SELECT
+                m.team_id,
+                m.tournament_id,
+                SUM(COALESCE(b.yellow_card, 0)) AS yellow_cards,
+                SUM(COALESCE(b.sending_off, 0)) AS sending_offs,
+                SUM(
+                    CASE
+                        WHEN COALESCE(b.second_yellow_card, 0) = 1 THEN 3
+                        WHEN COALESCE(b.red_card, 0) = 1
+                            AND COALESCE(b.yellow_card, 0) = 1 THEN 5
+                        WHEN COALESCE(b.red_card, 0) = 1 THEN 4
+                        WHEN COALESCE(b.yellow_card, 0) = 1 THEN 1
+                        ELSE 0
+                    END
+                ) AS fair_play_penalty
+            FROM team_tournament_matches AS m
+            LEFT JOIN raw_bookings AS b
+                ON b.team_id = m.team_id
+                AND b.tournament_id = m.tournament_id
+            GROUP BY m.team_id, m.tournament_id
+        ),
+        teams AS (
+            SELECT
+                team_id,
+                ARG_MAX(team_name, tournament_year) AS team_name,
+                ARG_MAX(team_code, tournament_year) AS team_code
+            FROM team_tournament_matches
+            GROUP BY team_id
+        ),
+        year_bounds AS (
+            SELECT
+                MIN(tournament_year) AS min_year,
+                GREATEST(MAX(tournament_year) + 4, ?::INTEGER) AS max_year
+            FROM team_tournament_matches
+        ),
+        team_year_grid AS (
+            SELECT
+                teams.team_id,
+                teams.team_name,
+                teams.team_code,
+                years.as_of_year
+            FROM teams
+            CROSS JOIN year_bounds
+            CROSS JOIN generate_series(
+                year_bounds.min_year,
+                year_bounds.max_year
+            ) AS years(as_of_year)
+        )
+        SELECT
+            grid.team_id,
+            grid.team_name,
+            grid.team_code,
+            regexp_replace(lower(grid.team_name), '[^a-z0-9]+', '', 'g')
+                AS normalized_team_name,
+            CAST(grid.as_of_year AS INTEGER) AS as_of_year,
+            COALESCE(
+                SUM(bookings.yellow_cards)::DOUBLE / NULLIF(SUM(matches.played), 0),
+                0.0
+            ) AS prior_world_cup_yellow_cards_per_match,
+            COALESCE(
+                SUM(bookings.sending_offs)::DOUBLE / NULLIF(SUM(matches.played), 0),
+                0.0
+            ) AS prior_world_cup_sending_offs_per_match,
+            COALESCE(
+                SUM(bookings.fair_play_penalty)::DOUBLE / NULLIF(SUM(matches.played), 0),
+                0.0
+            ) AS prior_world_cup_fair_play_penalty_per_match,
+            {source_file_expr} AS source_file,
+            current_timestamp AS loaded_at
+        FROM team_year_grid AS grid
+        LEFT JOIN team_tournament_matches AS matches
+            ON matches.team_id = grid.team_id
+            AND matches.tournament_year < grid.as_of_year
+        LEFT JOIN team_tournament_bookings AS bookings
+            ON bookings.team_id = matches.team_id
+            AND bookings.tournament_id = matches.tournament_id
+        GROUP BY grid.team_id, grid.team_name, grid.team_code, grid.as_of_year
+        """,
+        [max(date.today().year + 4, 2026)],
+    )
+
+
 def read_transfermarkt_manifest(path: Path) -> list[TransfermarktTeamTarget]:
     """Read a Transfermarkt team manifest JSON file."""
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -873,6 +1287,18 @@ def run_downloads(args: argparse.Namespace) -> list[Path]:
                 )
             )
 
+    if "fjelstul" in requested_sources:
+        fjelstul_raw_dir = raw_dir / "fjelstul_worldcup"
+        if _should_skip_existing_raw("fjelstul", fjelstul_raw_dir, args.force_download):
+            downloaded_paths.append(_resolve_fjelstul_worldcup_raw(raw_dir))
+        else:
+            downloaded_paths.append(
+                download_fjelstul_worldcup_matches(
+                    fjelstul_raw_dir,
+                    force=args.force_download,
+                )
+            )
+
     for path in downloaded_paths:
         LOGGER.info("Raw data available at %s", path)
     return downloaded_paths
@@ -969,6 +1395,26 @@ def run_loads(args: argparse.Namespace) -> list[LoadResult]:
                         transfermarkt_values,
                         db_path=db_path,
                         source_file=transfermarkt_raw,
+                    ),
+                    db_path,
+                    cutoff_date,
+                )
+            )
+
+    if "fjelstul" in requested_sources:
+        try:
+            fjelstul_raw = _resolve_fjelstul_worldcup_raw(raw_dir)
+        except FileNotFoundError as exc:
+            if explicit_sources:
+                raise
+            LOGGER.warning("Skipping Fjelstul load because no raw data is available: %s", exc)
+        else:
+            results.append(
+                _run_load_step(
+                    "fjelstul_world_cup_history",
+                    lambda: load_fjelstul_world_cup_history(
+                        fjelstul_raw,
+                        db_path=db_path,
                     ),
                     db_path,
                     cutoff_date,
@@ -1095,6 +1541,29 @@ def run_collection(args: argparse.Namespace) -> list[LoadResult]:
                     values,
                     db_path=db_path,
                     source_file=raw_path,
+                ),
+                db_path,
+                cutoff_date,
+            )
+        )
+
+    if "fjelstul" in requested_sources:
+        fjelstul_raw_dir = raw_dir / "fjelstul_worldcup"
+        if args.load_existing or _should_skip_existing_raw(
+            "fjelstul", fjelstul_raw_dir, args.force_download
+        ):
+            raw_path = _resolve_fjelstul_worldcup_raw(raw_dir)
+        else:
+            raw_path = download_fjelstul_worldcup_matches(
+                fjelstul_raw_dir,
+                force=args.force_download,
+            )
+        results.append(
+            _run_load_step(
+                "fjelstul_world_cup_history",
+                lambda: load_fjelstul_world_cup_history(
+                    raw_path,
+                    db_path=db_path,
                 ),
                 db_path,
                 cutoff_date,
@@ -1556,8 +2025,26 @@ def _resolve_transfermarkt_raw(raw_dir: Path, transfermarkt_raw: Path | None) ->
         raise FileNotFoundError(
             "No Transfermarkt JSONL raw file found. Run download-data with "
             "--transfermarkt-manifest first."
-    )
+        )
     return candidates[0]
+
+
+def _resolve_fjelstul_worldcup_raw(raw_dir: Path) -> Path:
+    raw_file = raw_dir / "fjelstul_worldcup" / FJELSTUL_WORLDCUP_RAW_FILENAME
+    if not _has_existing_file(raw_file):
+        raise FileNotFoundError(
+            "No Fjelstul World Cup raw CSV found. Run download-data with "
+            "--sources fjelstul first."
+        )
+    return raw_file
+
+
+def _resolve_optional_fjelstul_bookings_raw(source_root: Path) -> Path | None:
+    if source_root.is_file():
+        raw_file = source_root.parent / FJELSTUL_WORLDCUP_BOOKINGS_RAW_FILENAME
+    else:
+        raw_file = source_root / FJELSTUL_WORLDCUP_BOOKINGS_RAW_FILENAME
+    return raw_file if _has_existing_file(raw_file) else None
 
 
 def _should_skip_existing_raw(source_name: str, raw_path: Path, force_download: bool) -> bool:
@@ -1588,6 +2075,14 @@ def _source_raw_exists(source_name: str, raw_path: Path) -> bool:
             _has_existing_file(path)
             for path in raw_path.glob("market_values_*.jsonl")
             if path.is_file()
+        )
+    if source_name == "fjelstul":
+        return all(
+            _has_existing_file(raw_path / filename)
+            for filename in (
+                FJELSTUL_WORLDCUP_RAW_FILENAME,
+                FJELSTUL_WORLDCUP_BOOKINGS_RAW_FILENAME,
+            )
         )
     raise ValueError(f"Unsupported raw source: {source_name}")
 
