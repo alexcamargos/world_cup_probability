@@ -267,6 +267,8 @@ def _build_team_lambdas(
         has_world_football_elo_ratings = _world_football_elo_ratings_tables_available(con)
         has_fifa_world_ranking = _fifa_world_ranking_tables_available(con)
         has_squad_attributes = _squad_attributes_table_available(con)
+        has_world_cup_prior_history = _world_cup_prior_history_table_available(con)
+        has_world_cup_prior_discipline = _world_cup_prior_discipline_table_available(con)
         world_football_elo_ratings_cte = (
             """
             world_football_elo_ratings AS (
@@ -414,6 +416,100 @@ def _build_team_lambdas(
             if has_squad_attributes
             else ""
         )
+        world_cup_prior_history_cte = (
+            """
+            world_cup_prior_history AS (
+                SELECT
+                    team_id,
+                    team_name,
+                    team_code,
+                    normalized_team_name,
+                    prior_world_cup_appearances,
+                    prior_world_cup_points_per_match,
+                    prior_world_cup_goal_diff_per_match
+                FROM d_world_cup_prior_team_history
+                WHERE as_of_year = 2026
+            ),
+            """
+            if has_world_cup_prior_history
+            else ""
+        )
+        world_cup_prior_history_selects = (
+            """
+            COALESCE(CAST(wch.prior_world_cup_appearances AS DOUBLE), 0.0)
+                AS prior_world_cup_appearances,
+            COALESCE(wch.prior_world_cup_points_per_match, 0.0)
+                AS prior_world_cup_points_per_match,
+            COALESCE(wch.prior_world_cup_goal_diff_per_match, 0.0)
+                AS prior_world_cup_goal_diff_per_match,
+            """
+            if has_world_cup_prior_history
+            else """
+            0.0 AS prior_world_cup_appearances,
+            0.0 AS prior_world_cup_points_per_match,
+            0.0 AS prior_world_cup_goal_diff_per_match,
+            """
+        )
+        world_cup_prior_history_join = (
+            """
+            LEFT JOIN world_cup_prior_history AS wch
+                ON lower(wch.team_name) = lower(t.team_id)
+                OR wch.normalized_team_name
+                    = regexp_replace(lower(t.team_id), '[^a-z0-9]+', '', 'g')
+                OR lower(wch.team_code) = lower(t.team_id)
+                OR regexp_replace(lower(COALESCE(wch.team_code, '')), '[^a-z0-9]+', '', 'g')
+                    = regexp_replace(lower(t.team_id), '[^a-z0-9]+', '', 'g')
+            """
+            if has_world_cup_prior_history
+            else ""
+        )
+        world_cup_prior_discipline_cte = (
+            """
+            world_cup_prior_discipline AS (
+                SELECT
+                    team_id,
+                    team_name,
+                    team_code,
+                    normalized_team_name,
+                    prior_world_cup_yellow_cards_per_match,
+                    prior_world_cup_sending_offs_per_match,
+                    prior_world_cup_fair_play_penalty_per_match
+                FROM d_world_cup_prior_discipline_history
+                WHERE as_of_year = 2026
+            ),
+            """
+            if has_world_cup_prior_discipline
+            else ""
+        )
+        world_cup_prior_discipline_selects = (
+            """
+            COALESCE(wcd.prior_world_cup_yellow_cards_per_match, 0.0)
+                AS prior_world_cup_yellow_cards_per_match,
+            COALESCE(wcd.prior_world_cup_sending_offs_per_match, 0.0)
+                AS prior_world_cup_sending_offs_per_match,
+            COALESCE(wcd.prior_world_cup_fair_play_penalty_per_match, 0.0)
+                AS prior_world_cup_fair_play_penalty_per_match,
+            """
+            if has_world_cup_prior_discipline
+            else """
+            0.0 AS prior_world_cup_yellow_cards_per_match,
+            0.0 AS prior_world_cup_sending_offs_per_match,
+            0.0 AS prior_world_cup_fair_play_penalty_per_match,
+            """
+        )
+        world_cup_prior_discipline_join = (
+            """
+            LEFT JOIN world_cup_prior_discipline AS wcd
+                ON lower(wcd.team_name) = lower(t.team_id)
+                OR wcd.normalized_team_name
+                    = regexp_replace(lower(t.team_id), '[^a-z0-9]+', '', 'g')
+                OR lower(wcd.team_code) = lower(t.team_id)
+                OR regexp_replace(lower(COALESCE(wcd.team_code, '')), '[^a-z0-9]+', '', 'g')
+                    = regexp_replace(lower(t.team_id), '[^a-z0-9]+', '', 'g')
+            """
+            if has_world_cup_prior_discipline
+            else ""
+        )
         match_history_exclusion = current_world_cup_exclusion_sql(
             date_expr="match_date",
             competition_expr="competition",
@@ -429,12 +525,18 @@ def _build_team_lambdas(
             world_football_elo_ratings_cte=world_football_elo_ratings_cte,
             fifa_world_ranking_cte=fifa_world_ranking_cte,
             squad_attributes_ctes=squad_attributes_ctes,
+            world_cup_prior_history_cte=world_cup_prior_history_cte,
+            world_cup_prior_discipline_cte=world_cup_prior_discipline_cte,
             world_football_elo_ratings_select=world_football_elo_ratings_select,
             fifa_world_ranking_points_select=fifa_world_ranking_points_select,
             fifa_world_ranking_rank_select=fifa_world_ranking_rank_select,
+            world_cup_prior_history_selects=world_cup_prior_history_selects,
+            world_cup_prior_discipline_selects=world_cup_prior_discipline_selects,
             squad_attributes_select=squad_attributes_select,
             world_football_elo_ratings_join=world_football_elo_ratings_join,
             fifa_world_ranking_join=fifa_world_ranking_join,
+            world_cup_prior_history_join=world_cup_prior_history_join,
+            world_cup_prior_discipline_join=world_cup_prior_discipline_join,
             squad_attributes_join=squad_attributes_join,
         )
         team_frame = con.sql(query).pl()
@@ -451,6 +553,22 @@ def _build_team_lambdas(
             pl.mean("world_football_elo_ratings_now").alias("world_football_elo_ratings_mean"),
             pl.mean("fifa_world_ranking_points").alias("fifa_world_ranking_points_mean"),
             pl.mean("fifa_world_ranking_rank").alias("fifa_world_ranking_rank_mean"),
+            pl.mean("prior_world_cup_appearances").alias("prior_world_cup_appearances_mean"),
+            pl.mean("prior_world_cup_points_per_match").alias(
+                "prior_world_cup_points_per_match_mean"
+            ),
+            pl.mean("prior_world_cup_goal_diff_per_match").alias(
+                "prior_world_cup_goal_diff_per_match_mean"
+            ),
+            pl.mean("prior_world_cup_yellow_cards_per_match").alias(
+                "prior_world_cup_yellow_cards_per_match_mean"
+            ),
+            pl.mean("prior_world_cup_sending_offs_per_match").alias(
+                "prior_world_cup_sending_offs_per_match_mean"
+            ),
+            pl.mean("prior_world_cup_fair_play_penalty_per_match").alias(
+                "prior_world_cup_fair_play_penalty_per_match_mean"
+            ),
             pl.mean("market_value_eur").alias("market_value_mean"),
             pl.mean("avg_overall").alias("avg_overall_mean"),
             pl.mean("avg_pace").alias("avg_pace_mean"),
@@ -464,6 +582,12 @@ def _build_team_lambdas(
         world_football_elo_ratings_mean,
         fifa_world_ranking_points_mean,
         fifa_world_ranking_rank_mean,
+        prior_world_cup_appearances_mean,
+        prior_world_cup_points_per_match_mean,
+        prior_world_cup_goal_diff_per_match_mean,
+        prior_world_cup_yellow_cards_per_match_mean,
+        prior_world_cup_sending_offs_per_match_mean,
+        prior_world_cup_fair_play_penalty_per_match_mean,
         market_value_mean,
         avg_overall_mean,
         avg_pace_mean,
@@ -486,6 +610,29 @@ def _build_team_lambdas(
             (pl.lit(fifa_world_ranking_rank_mean) - pl.col("fifa_world_ranking_rank")).alias(
                 "fifa_world_ranking_rank_diff"
             ),
+            (
+                pl.col("prior_world_cup_appearances") - pl.lit(prior_world_cup_appearances_mean)
+            ).alias("prior_world_cup_appearances_diff"),
+            (
+                pl.col("prior_world_cup_points_per_match")
+                - pl.lit(prior_world_cup_points_per_match_mean)
+            ).alias("prior_world_cup_points_per_match_diff"),
+            (
+                pl.col("prior_world_cup_goal_diff_per_match")
+                - pl.lit(prior_world_cup_goal_diff_per_match_mean)
+            ).alias("prior_world_cup_goal_diff_per_match_diff"),
+            (
+                pl.col("prior_world_cup_yellow_cards_per_match")
+                - pl.lit(prior_world_cup_yellow_cards_per_match_mean)
+            ).alias("prior_world_cup_yellow_cards_per_match_diff"),
+            (
+                pl.col("prior_world_cup_sending_offs_per_match")
+                - pl.lit(prior_world_cup_sending_offs_per_match_mean)
+            ).alias("prior_world_cup_sending_offs_per_match_diff"),
+            (
+                pl.col("prior_world_cup_fair_play_penalty_per_match")
+                - pl.lit(prior_world_cup_fair_play_penalty_per_match_mean)
+            ).alias("prior_world_cup_fair_play_penalty_per_match_diff"),
             (pl.col("market_value_eur") - pl.lit(market_value_mean)).alias("market_value_diff"),
             (pl.col("avg_overall") - pl.lit(avg_overall_mean)).alias("avg_overall_diff"),
             (pl.col("avg_pace") - pl.lit(avg_pace_mean)).alias("avg_pace_diff"),
@@ -530,6 +677,9 @@ def _world_cup_2026_team_lambdas(scored_frame: pl.DataFrame) -> list[TeamLambda]
         lookup[_normalize_team_key(str(row["team_name"]))] = row
 
     average_lambda = float(scored_frame.get_column("lambda_goals").mean() or 1.0)
+    average_fair_play_penalty_rate = float(
+        scored_frame.get_column("prior_world_cup_fair_play_penalty_per_match").mean() or 0.0
+    )
     team_lambdas: list[TeamLambda] = []
     missing_codes: list[str] = []
 
@@ -544,15 +694,18 @@ def _world_cup_2026_team_lambdas(scored_frame: pl.DataFrame) -> list[TeamLambda]
         )
         if row is None:
             lambda_goals = average_lambda
+            fair_play_penalty_rate = average_fair_play_penalty_rate
             missing_codes.append(code)
         else:
             lambda_goals = float(row["lambda_goals"])
+            fair_play_penalty_rate = float(row["prior_world_cup_fair_play_penalty_per_match"])
         team_lambdas.append(
             TeamLambda(
                 team_id=code,
                 team_name=official_name,
                 lambda_goals=lambda_goals,
                 country_code=TEAM_COUNTRIES.get(code, code),
+                fair_play_penalty_rate=fair_play_penalty_rate,
             )
         )
 
@@ -625,6 +778,33 @@ def _squad_attributes_table_available(con: duckdb.DuckDBPyConnection) -> bool:
             SELECT COUNT(*)
             FROM information_schema.tables
             WHERE table_schema = 'main' AND table_name = 'd_squad_attributes'
+            """,
+        ).fetchone()[0]
+        > 0
+    )
+
+
+def _world_cup_prior_history_table_available(con: duckdb.DuckDBPyConnection) -> bool:
+    return (
+        con.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_name = 'd_world_cup_prior_team_history'
+            """,
+        ).fetchone()[0]
+        > 0
+    )
+
+
+def _world_cup_prior_discipline_table_available(con: duckdb.DuckDBPyConnection) -> bool:
+    return (
+        con.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'main'
+              AND table_name = 'd_world_cup_prior_discipline_history'
             """,
         ).fetchone()[0]
         > 0
