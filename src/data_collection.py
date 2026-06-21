@@ -27,8 +27,10 @@ import requests
 from bs4 import BeautifulSoup
 
 try:
+    from .competition_filters import current_world_cup_exclusion_sql
     from .db_init import DB_PATH, RAW_DIR, initialize_database
 except ImportError:  # pragma: no cover - supports direct script execution.
+    from competition_filters import current_world_cup_exclusion_sql
     from db_init import DB_PATH, RAW_DIR, initialize_database
 
 LOGGER = logging.getLogger(__name__)
@@ -196,10 +198,15 @@ def load_historical_matches(
             else "NULL::VARCHAR"
         )
         source_file_expr = _sql_string_literal(str(source_file))
+        current_world_cup_exclusion = current_world_cup_exclusion_sql(
+            date_expr=date_expr,
+            competition_expr=tournament_expr,
+        )
         valid_match_filter = (
             f"{date_expr} >= {_sql_date_literal(cutoff_date)} "
             f"AND {home_score_expr} IS NOT NULL "
-            f"AND {away_score_expr} IS NOT NULL"
+            f"AND {away_score_expr} IS NOT NULL "
+            f"AND {current_world_cup_exclusion}"
         )
 
         con.execute("DELETE FROM f_matches WHERE source_file = ?", [str(source_file)])
