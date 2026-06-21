@@ -4,8 +4,15 @@ import logging
 from pathlib import Path
 
 import duckdb
+import numpy as np
 
-from src.simulator import TeamLambda, simulate_world_cup
+from src.simulator import (
+    GroupStanding,
+    TeamLambda,
+    _apply_group_result,
+    simulate_match,
+    simulate_world_cup,
+)
 from src.world_cup_2026_schedule import TEAM_COUNTRIES, TEAM_NAMES, world_cup_2026_fixtures
 
 
@@ -71,3 +78,22 @@ def test_simulate_world_cup_uses_real_schedule_without_preserving_real_scores(
     assert opening_match == (0, 0, "Mexico City Stadium", True)
     assert rest_rows > 0
     assert "Simulation progress: tournament 1/1 completed" in caplog.text
+
+
+def test_group_result_accumulates_fair_play_penalty_from_team_rate() -> None:
+    home = TeamLambda("A", "A", 0.0, fair_play_penalty_rate=0.0)
+    away = TeamLambda("B", "B", 0.0, fair_play_penalty_rate=10.0)
+    rng = np.random.default_rng(7)
+    fixture = world_cup_2026_fixtures()[0]
+    result = simulate_match(home, away, require_winner=False, rng=rng)
+    standings = {
+        "A": {
+            "A": GroupStanding(team=home, group_letter="A"),
+            "B": GroupStanding(team=away, group_letter="A"),
+        }
+    }
+
+    _apply_group_result(standings, fixture, result, rng)
+
+    assert standings["A"]["A"].fair_play_points == 0
+    assert standings["A"]["B"].fair_play_points > 0
