@@ -19,6 +19,7 @@ import xgboost as xgb
 
 try:
     from .analytics import export_analytics
+    from .competition_filters import current_world_cup_exclusion_sql
     from .db_init import initialize_database
     from .elo_engine import DB_PATH as WAREHOUSE_DB_PATH
     from .elo_engine import build_elo_history
@@ -38,6 +39,7 @@ try:
     from .world_football_elo_ratings import load_world_football_elo_ratings
 except ImportError:  # pragma: no cover - supports direct script execution.
     from analytics import export_analytics
+    from competition_filters import current_world_cup_exclusion_sql
     from db_init import initialize_database
     from elo_engine import DB_PATH as WAREHOUSE_DB_PATH
     from elo_engine import build_elo_history
@@ -330,6 +332,14 @@ def _build_team_lambdas(
             if has_squad_attributes
             else ""
         )
+        match_history_exclusion = current_world_cup_exclusion_sql(
+            date_expr="match_date",
+            competition_expr="competition",
+        )
+        elo_history_exclusion = current_world_cup_exclusion_sql(
+            date_expr="m.match_date",
+            competition_expr="m.competition",
+        )
         query = f"""
             WITH team_match_history AS (
                 SELECT
@@ -339,6 +349,7 @@ def _build_team_lambdas(
                     home_team_score AS goals_for,
                     away_team_score AS goals_against
                 FROM f_matches
+                WHERE {match_history_exclusion}
                 UNION ALL
                 SELECT
                     match_id,
@@ -347,6 +358,7 @@ def _build_team_lambdas(
                     away_team_score AS goals_for,
                     home_team_score AS goals_against
                 FROM f_matches
+                WHERE {match_history_exclusion}
             ),
             latest_world_cup_probability_elo AS (
                 SELECT team_id, world_cup_probability_elo_now
@@ -360,18 +372,24 @@ def _build_team_lambdas(
                         ) AS rn
                     FROM (
                         SELECT
-                            match_id,
-                            match_date,
-                            home_team_id AS team_id,
-                            home_rating_after AS world_cup_probability_elo_now
-                        FROM f_elo_history
+                            e.match_id,
+                            e.match_date,
+                            e.home_team_id AS team_id,
+                            e.home_rating_after AS world_cup_probability_elo_now
+                        FROM f_elo_history AS e
+                        INNER JOIN f_matches AS m
+                            ON m.match_id = e.match_id
+                        WHERE {elo_history_exclusion}
                         UNION ALL
                         SELECT
-                            match_id,
-                            match_date,
-                            away_team_id AS team_id,
-                            away_rating_after AS world_cup_probability_elo_now
-                        FROM f_elo_history
+                            e.match_id,
+                            e.match_date,
+                            e.away_team_id AS team_id,
+                            e.away_rating_after AS world_cup_probability_elo_now
+                        FROM f_elo_history AS e
+                        INNER JOIN f_matches AS m
+                            ON m.match_id = e.match_id
+                        WHERE {elo_history_exclusion}
                     ) AS elo_union
                 ) AS ranked
                 WHERE rn = 1
