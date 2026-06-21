@@ -140,6 +140,38 @@ DDL_STATEMENTS: tuple[str, ...] = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS d_fifa_world_ranking (
+        fifa_country_code VARCHAR PRIMARY KEY,
+        fifa_team_id VARCHAR,
+        team_name VARCHAR NOT NULL,
+        confederation VARCHAR,
+        fifa_rank INTEGER NOT NULL,
+        previous_rank INTEGER,
+        ranking_points DOUBLE NOT NULL,
+        previous_points DOUBLE,
+        ranking_movement INTEGER,
+        matches INTEGER,
+        ranking_date DATE NOT NULL,
+        next_update_date DATE,
+        source_url VARCHAR,
+        api_url VARCHAR,
+        source_file VARCHAR,
+        loaded_at TIMESTAMP
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS d_fifa_world_ranking_team_aliases (
+        team_alias_key VARCHAR PRIMARY KEY,
+        team_alias VARCHAR NOT NULL,
+        normalized_team_alias VARCHAR NOT NULL,
+        fifa_country_code VARCHAR NOT NULL,
+        source_file VARCHAR,
+        loaded_at TIMESTAMP,
+        FOREIGN KEY (fifa_country_code)
+            REFERENCES d_fifa_world_ranking(fifa_country_code)
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS data_collection_runs (
         run_id VARCHAR PRIMARY KEY,
         source_name VARCHAR NOT NULL,
