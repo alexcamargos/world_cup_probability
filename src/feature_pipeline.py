@@ -82,8 +82,88 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
     """Read the consolidated match-level relation from DuckDB into Polars."""
     has_world_football_elo_ratings = _world_football_elo_ratings_tables_available(con)
     has_fifa_world_ranking = _fifa_world_ranking_tables_available(con)
+    has_squad_attributes = _squad_attributes_table_available(con)
     home_team_key = "regexp_replace(lower(m.home_team_id), '[^a-z0-9]+', '', 'g')"
     away_team_key = "regexp_replace(lower(m.away_team_id), '[^a-z0-9]+', '', 'g')"
+    squad_attributes_ctes = (
+        """
+        WITH latest_squad_attributes AS (
+            SELECT
+                team_id,
+                avg_overall,
+                avg_pace,
+                avg_stamina,
+                CAST(sampled_player_count AS DOUBLE) AS squad_depth_proxy
+            FROM (
+                SELECT
+                    team_id,
+                    avg_overall,
+                    avg_pace,
+                    avg_stamina,
+                    sampled_player_count,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY team_id
+                        ORDER BY source_season DESC NULLS LAST, loaded_at DESC NULLS LAST
+                    ) AS rn
+                FROM d_squad_attributes
+            ) AS ranked_squad_attributes
+            WHERE rn = 1
+        ),
+        squad_attribute_defaults AS (
+            SELECT
+                COALESCE(AVG(avg_overall), 0.0) AS avg_overall,
+                COALESCE(AVG(avg_pace), 0.0) AS avg_pace,
+                COALESCE(AVG(avg_stamina), 0.0) AS avg_stamina,
+                COALESCE(AVG(squad_depth_proxy), 0.0) AS squad_depth_proxy
+            FROM latest_squad_attributes
+        )
+        """
+        if has_squad_attributes
+        else ""
+    )
+    home_squad_attribute_selects = (
+        """
+            COALESCE(hsa.avg_overall, sad.avg_overall) AS home_avg_overall,
+            COALESCE(hsa.avg_pace, sad.avg_pace) AS home_avg_pace,
+            COALESCE(hsa.avg_stamina, sad.avg_stamina) AS home_avg_stamina,
+            COALESCE(hsa.squad_depth_proxy, sad.squad_depth_proxy) AS home_squad_depth_proxy,
+        """
+        if has_squad_attributes
+        else """
+            0.0 AS home_avg_overall,
+            0.0 AS home_avg_pace,
+            0.0 AS home_avg_stamina,
+            0.0 AS home_squad_depth_proxy,
+        """
+    )
+    away_squad_attribute_selects = (
+        """
+            COALESCE(asa.avg_overall, sad.avg_overall) AS away_avg_overall,
+            COALESCE(asa.avg_pace, sad.avg_pace) AS away_avg_pace,
+            COALESCE(asa.avg_stamina, sad.avg_stamina) AS away_avg_stamina,
+            COALESCE(asa.squad_depth_proxy, sad.squad_depth_proxy) AS away_squad_depth_proxy,
+        """
+        if has_squad_attributes
+        else """
+            0.0 AS away_avg_overall,
+            0.0 AS away_avg_pace,
+            0.0 AS away_avg_stamina,
+            0.0 AS away_squad_depth_proxy,
+        """
+    )
+    squad_attribute_joins = (
+        f"""
+        CROSS JOIN squad_attribute_defaults AS sad
+        LEFT JOIN latest_squad_attributes AS hsa
+            ON lower(hsa.team_id) = lower(m.home_team_id)
+            OR regexp_replace(lower(hsa.team_id), '[^a-z0-9]+', '', 'g') = {home_team_key}
+        LEFT JOIN latest_squad_attributes AS asa
+            ON lower(asa.team_id) = lower(m.away_team_id)
+            OR regexp_replace(lower(asa.team_id), '[^a-z0-9]+', '', 'g') = {away_team_key}
+        """
+        if has_squad_attributes
+        else ""
+    )
     home_world_football_elo_ratings_expr = (
         "COALESCE(her.elo_rating, e.home_rating_before)"
         if has_world_football_elo_ratings
@@ -144,6 +224,7 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
     )
 
     query = f"""
+        {squad_attributes_ctes}
         SELECT
             m.match_id,
             m.match_date,
@@ -163,6 +244,8 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
             {away_fifa_points_expr} AS away_fifa_world_ranking_points,
             {home_fifa_rank_expr} AS home_fifa_world_ranking_rank,
             {away_fifa_rank_expr} AS away_fifa_world_ranking_rank,
+            {home_squad_attribute_selects}
+            {away_squad_attribute_selects}
             COALESCE(ht.market_value_eur, 0.0) AS home_market_value_eur,
             COALESCE(awt.market_value_eur, 0.0) AS away_market_value_eur
         FROM f_matches AS m
@@ -170,6 +253,7 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
             ON e.match_id = m.match_id
         {world_football_elo_ratings_joins}
         {fifa_world_ranking_joins}
+        {squad_attribute_joins}
         LEFT JOIN d_teams AS ht
             ON ht.team_id = m.home_team_id
         LEFT JOIN d_teams AS awt
@@ -215,6 +299,19 @@ def _fifa_world_ranking_tables_available(con: duckdb.DuckDBPyConnection) -> bool
     )
 
 
+def _squad_attributes_table_available(con: duckdb.DuckDBPyConnection) -> bool:
+    return (
+        con.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_name = 'd_squad_attributes'
+            """,
+        ).fetchone()[0]
+        > 0
+    )
+
+
 def _build_team_level_features(match_df: pl.DataFrame) -> pl.DataFrame:
     """Derive recent-form features and collapse the dataset back to match level."""
     home_team = _build_side_frame(match_df, side="home")
@@ -249,6 +346,16 @@ def _build_team_level_features(match_df: pl.DataFrame) -> pl.DataFrame:
             ).alias("fifa_world_ranking_rank_diff"),
             (pl.col("team_market_value_eur") - pl.col("team_market_value_eur_away")).alias(
                 "market_value_diff"
+            ),
+            (pl.col("team_avg_overall") - pl.col("team_avg_overall_away")).alias(
+                "avg_overall_diff"
+            ),
+            (pl.col("team_avg_pace") - pl.col("team_avg_pace_away")).alias("avg_pace_diff"),
+            (pl.col("team_avg_stamina") - pl.col("team_avg_stamina_away")).alias(
+                "avg_stamina_diff"
+            ),
+            (pl.col("team_squad_depth_proxy") - pl.col("team_squad_depth_proxy_away")).alias(
+                "squad_depth_proxy"
             ),
             (pl.col("recent_form") - pl.col("recent_form_away")).alias("recent_form_diff"),
             pl.col("target"),
@@ -289,6 +396,14 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
                 pl.col("away_fifa_world_ranking_rank").alias("opponent_fifa_world_ranking_rank"),
                 pl.col("home_market_value_eur").alias("team_market_value_eur"),
                 pl.col("away_market_value_eur").alias("opponent_market_value_eur"),
+                pl.col("home_avg_overall").alias("team_avg_overall"),
+                pl.col("away_avg_overall").alias("opponent_avg_overall"),
+                pl.col("home_avg_pace").alias("team_avg_pace"),
+                pl.col("away_avg_pace").alias("opponent_avg_pace"),
+                pl.col("home_avg_stamina").alias("team_avg_stamina"),
+                pl.col("away_avg_stamina").alias("opponent_avg_stamina"),
+                pl.col("home_squad_depth_proxy").alias("team_squad_depth_proxy"),
+                pl.col("away_squad_depth_proxy").alias("opponent_squad_depth_proxy"),
                 pl.col("home_team_score").alias("goals_for"),
                 pl.col("away_team_score").alias("goals_against"),
                 pl.col("home_team_score").alias("target"),
@@ -316,6 +431,14 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
             pl.col("home_fifa_world_ranking_rank").alias("opponent_fifa_world_ranking_rank"),
             pl.col("away_market_value_eur").alias("team_market_value_eur"),
             pl.col("home_market_value_eur").alias("opponent_market_value_eur"),
+            pl.col("away_avg_overall").alias("team_avg_overall"),
+            pl.col("home_avg_overall").alias("opponent_avg_overall"),
+            pl.col("away_avg_pace").alias("team_avg_pace"),
+            pl.col("home_avg_pace").alias("opponent_avg_pace"),
+            pl.col("away_avg_stamina").alias("team_avg_stamina"),
+            pl.col("home_avg_stamina").alias("opponent_avg_stamina"),
+            pl.col("away_squad_depth_proxy").alias("team_squad_depth_proxy"),
+            pl.col("home_squad_depth_proxy").alias("opponent_squad_depth_proxy"),
             pl.col("away_team_score").alias("goals_for"),
             pl.col("home_team_score").alias("goals_against"),
             pl.col("away_team_score").alias("target"),
@@ -361,6 +484,14 @@ def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("opponent_fifa_world_ranking_rank"),
             pl.col("team_market_value_eur"),
             pl.col("opponent_market_value_eur"),
+            pl.col("team_avg_overall"),
+            pl.col("opponent_avg_overall"),
+            pl.col("team_avg_pace"),
+            pl.col("opponent_avg_pace"),
+            pl.col("team_avg_stamina"),
+            pl.col("opponent_avg_stamina"),
+            pl.col("team_squad_depth_proxy"),
+            pl.col("opponent_squad_depth_proxy"),
             pl.col("recent_form"),
             pl.col("target"),
         ]
