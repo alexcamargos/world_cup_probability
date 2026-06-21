@@ -11,6 +11,7 @@ import src.data_collection as data_collection
 from src.data_collection import (
     TransfermarktMarketValue,
     download_kaggle_dataset,
+    load_fjelstul_world_cup_history,
     load_historical_matches,
     load_squad_attributes,
     parse_market_value_eur,
@@ -91,6 +92,137 @@ def test_load_squad_attributes_aggregates_top_11_players(tmp_path: Path) -> None
         ).fetchone()
 
     assert brazil == (85.0, 11)
+
+
+def test_load_fjelstul_world_cup_history_uses_prior_tournaments_only(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw" / "fjelstul_worldcup"
+    raw_dir.mkdir(parents=True)
+    source_file = raw_dir / "matches.csv"
+    source_file.write_text(
+        "\n".join(
+            [
+                (
+                    "tournament_id,tournament_name,match_id,match_date,home_team_id,"
+                    "home_team_name,home_team_code,away_team_id,away_team_name,"
+                    "away_team_code,home_team_score,away_team_score"
+                ),
+                (
+                    "WC-1930,1930 FIFA Men's World Cup,M-1,1930-07-13,T-01,"
+                    "Brazil,BRA,T-02,Argentina,ARG,2,1"
+                ),
+                (
+                    "WC-1934,1934 FIFA Men's World Cup,M-2,1934-05-27,T-01,"
+                    "Brazil,BRA,T-03,Spain,ESP,0,0"
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "warehouse" / "world_cup.duckdb"
+
+    result = load_fjelstul_world_cup_history(raw_dir, db_path=db_path)
+
+    assert result.rows_loaded > 0
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        before_1930 = con.execute(
+            """
+            SELECT
+                prior_world_cup_appearances,
+                prior_world_cup_points_per_match,
+                prior_world_cup_goal_diff_per_match
+            FROM d_world_cup_prior_team_history
+            WHERE team_name = 'Brazil' AND as_of_year = 1930
+            """
+        ).fetchone()
+        before_1934 = con.execute(
+            """
+            SELECT
+                prior_world_cup_appearances,
+                prior_world_cup_points_per_match,
+                prior_world_cup_goal_diff_per_match
+            FROM d_world_cup_prior_team_history
+            WHERE team_name = 'Brazil' AND as_of_year = 1934
+            """
+        ).fetchone()
+
+    assert before_1930 == (0, 0.0, 0.0)
+    assert before_1934 == (1, 3.0, 1.0)
+
+
+def test_load_fjelstul_world_cup_history_builds_prior_discipline_rates(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw" / "fjelstul_worldcup"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "matches.csv").write_text(
+        "\n".join(
+            [
+                (
+                    "tournament_id,tournament_name,match_id,match_date,home_team_id,"
+                    "home_team_name,home_team_code,away_team_id,away_team_name,"
+                    "away_team_code,home_team_score,away_team_score"
+                ),
+                (
+                    "WC-1970,1970 FIFA Men's World Cup,M-1,1970-05-31,T-01,"
+                    "Brazil,BRA,T-02,Argentina,ARG,2,1"
+                ),
+                (
+                    "WC-1970,1970 FIFA Men's World Cup,M-2,1970-06-03,T-01,"
+                    "Brazil,BRA,T-03,Spain,ESP,1,1"
+                ),
+                (
+                    "WC-1974,1974 FIFA Men's World Cup,M-3,1974-06-13,T-01,"
+                    "Brazil,BRA,T-02,Argentina,ARG,0,0"
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "bookings.csv").write_text(
+        "\n".join(
+            [
+                (
+                    "tournament_id,tournament_name,match_id,match_date,team_id,team_name,"
+                    "team_code,yellow_card,red_card,second_yellow_card,sending_off"
+                ),
+                "WC-1970,1970 FIFA Men's World Cup,M-1,1970-05-31,T-01,Brazil,BRA,1,0,0,0",
+                "WC-1970,1970 FIFA Men's World Cup,M-2,1970-06-03,T-01,Brazil,BRA,1,0,1,1",
+                "WC-1970,1970 FIFA Men's World Cup,M-1,1970-05-31,T-02,Argentina,ARG,0,1,0,1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "warehouse" / "world_cup.duckdb"
+
+    load_fjelstul_world_cup_history(raw_dir, db_path=db_path)
+
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        brazil = con.execute(
+            """
+            SELECT
+                prior_world_cup_yellow_cards_per_match,
+                prior_world_cup_sending_offs_per_match,
+                prior_world_cup_fair_play_penalty_per_match
+            FROM d_world_cup_prior_discipline_history
+            WHERE team_name = 'Brazil' AND as_of_year = 1974
+            """
+        ).fetchone()
+        before_1970 = con.execute(
+            """
+            SELECT
+                prior_world_cup_yellow_cards_per_match,
+                prior_world_cup_sending_offs_per_match,
+                prior_world_cup_fair_play_penalty_per_match
+            FROM d_world_cup_prior_discipline_history
+            WHERE team_name = 'Brazil' AND as_of_year = 1970
+            """
+        ).fetchone()
+
+    assert before_1970 == (0.0, 0.0, 0.0)
+    assert brazil == (1.0, 0.5, 2.0)
 
 
 def test_transfermarkt_parser_and_persistence(tmp_path: Path) -> None:
