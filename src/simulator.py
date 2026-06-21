@@ -63,6 +63,7 @@ class TeamLambda:
     team_name: str
     lambda_goals: float
     country_code: str | None = None
+    fair_play_penalty_rate: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,7 +346,7 @@ def _simulate_tournament(
             last_played_at,
             require_winner=False,
         )
-        _apply_group_result(group_standings, fixture, result)
+        _apply_group_result(group_standings, fixture, result, rng)
         group_match_results.append(_group_match_result(fixture, result))
         match_results[fixture.match_number] = result
         rows.append(_row_tuple(result))
@@ -457,6 +458,7 @@ def _apply_group_result(
     standings: dict[str, dict[str, GroupStanding]],
     fixture: WorldCupFixture,
     result: SimulatedMatch,
+    rng: np.random.Generator,
 ) -> None:
     group_letter = _group_letter(fixture.group_name)
     home = standings[group_letter][result.home_team_id]
@@ -468,6 +470,8 @@ def _apply_group_result(
     home.goals_against += result.away_goals
     away.goals_for += result.away_goals
     away.goals_against += result.home_goals
+    home.fair_play_points += _simulate_fair_play_penalty(home.team, rng)
+    away.fair_play_points += _simulate_fair_play_penalty(away.team, rng)
 
     if result.home_goals > result.away_goals:
         home.points += 3
@@ -476,6 +480,11 @@ def _apply_group_result(
     else:
         home.points += 1
         away.points += 1
+
+
+def _simulate_fair_play_penalty(team: TeamLambda, rng: np.random.Generator) -> int:
+    """Sample positive fair-play penalty points from prior World Cup discipline."""
+    return int(rng.poisson(max(float(team.fair_play_penalty_rate), 0.0)))
 
 
 def _group_match_result(
@@ -789,6 +798,7 @@ def _teams_by_code(teams: Sequence[TeamLambda]) -> dict[str, TeamLambda]:
             team_name=official_name,
             lambda_goals=team.lambda_goals,
             country_code=team.country_code or TEAM_COUNTRIES.get(code, code),
+            fair_play_penalty_rate=team.fair_play_penalty_rate,
         )
     return by_code
 
