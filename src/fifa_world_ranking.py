@@ -331,11 +331,17 @@ def load_fifa_world_ranking(
     db_path: Path = DB_PATH,
     raw_path: Path = DEFAULT_RAW_PATH,
     load_existing: bool = False,
+    force_download: bool = False,
     page_url: str = DEFAULT_PAGE_URL,
     api_url: str = DEFAULT_API_URL,
 ) -> int:
     """Fetch or read FIFA World Ranking, then persist it into DuckDB."""
-    if load_existing:
+    if load_existing or (raw_path.is_file() and raw_path.stat().st_size > 0 and not force_download):
+        if not load_existing:
+            LOGGER.info(
+                "Skipping FIFA World Ranking download because raw data exists at %s",
+                raw_path,
+            )
         snapshot = read_fifa_world_ranking_raw(raw_path)
     else:
         snapshot = fetch_fifa_world_ranking_snapshot(page_url=page_url, api_url=api_url)
@@ -371,6 +377,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Load the existing JSONL snapshot instead of downloading a fresh one.",
     )
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Download a fresh snapshot even when the JSONL raw file already exists.",
+    )
     parser.add_argument("--page-url", default=DEFAULT_PAGE_URL, help="FIFA ranking page URL.")
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="FIFA rankings API URL.")
     return parser
@@ -388,6 +399,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             db_path=args.db_path,
             raw_path=args.raw_path,
             load_existing=args.load_existing,
+            force_download=args.force_download,
             page_url=args.page_url,
             api_url=args.api_url,
         )
