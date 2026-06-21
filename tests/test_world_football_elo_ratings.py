@@ -6,10 +6,12 @@ from pathlib import Path
 import duckdb
 import pytest
 
+import src.world_football_elo_ratings as world_football_elo_ratings
 from src.db_init import initialize_database
 from src.elo_engine import initialize_elo_history
 from src.feature_pipeline import build_feature_frame
 from src.world_football_elo_ratings import (
+    load_world_football_elo_ratings,
     parse_team_dictionary,
     parse_world_ratings,
     persist_world_football_elo_ratings_snapshot,
@@ -49,6 +51,36 @@ def test_world_football_elo_ratings_raw_round_trip(tmp_path: Path) -> None:
     assert loaded.ratings == snapshot.ratings
     assert loaded.aliases == snapshot.aliases
     assert any(alias.team_alias == "Czech Republic" for alias in loaded.aliases)
+
+
+def test_world_football_elo_ratings_load_skips_download_when_raw_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = parse_world_ratings(
+        WORLD_TSV,
+        team_dictionary=parse_team_dictionary(TEAM_TSV),
+        rating_date=date(2026, 6, 20),
+        source_url="https://www.eloratings.net/World.tsv",
+    )
+    raw_path = tmp_path / "raw" / "eloratings" / "world_football_elo_ratings_snapshot.jsonl"
+    write_world_football_elo_ratings_raw(snapshot, raw_path)
+
+    def fail_fetch(*args: object, **kwargs: object) -> object:
+        raise AssertionError("World Football Elo Ratings download should not run.")
+
+    monkeypatch.setattr(
+        world_football_elo_ratings,
+        "fetch_world_football_elo_ratings_snapshot",
+        fail_fetch,
+    )
+
+    rows_loaded = load_world_football_elo_ratings(
+        db_path=tmp_path / "warehouse" / "world_cup.duckdb",
+        raw_path=raw_path,
+    )
+
+    assert rows_loaded == 3
 
 
 def test_world_football_elo_ratings_supports_feature_training_frame(tmp_path: Path) -> None:
