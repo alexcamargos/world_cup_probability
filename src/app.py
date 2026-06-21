@@ -12,12 +12,11 @@ import duckdb
 import streamlit as st
 
 try:
+    from .settings import DB_PATH
     from .world_cup_2026_schedule import WorldCupFixture, world_cup_2026_fixtures
 except ImportError:  # pragma: no cover - supports `streamlit run src/app.py`.
+    from settings import DB_PATH
     from world_cup_2026_schedule import WorldCupFixture, world_cup_2026_fixtures
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = PROJECT_ROOT / "data" / "warehouse" / "world_cup.duckdb"
 
 ROUND_ORDER = {
     "round_of_32": 4,

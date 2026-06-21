@@ -12,11 +12,14 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
-LOGGER = logging.getLogger(__name__)
+try:
+    from .settings import ANALYTICS_EXPORT_DIR as EXPORT_DIR
+    from .settings import DB_PATH
+except ImportError:  # pragma: no cover - supports direct script execution.
+    from settings import ANALYTICS_EXPORT_DIR as EXPORT_DIR
+    from settings import DB_PATH
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = PROJECT_ROOT / "data" / "warehouse" / "world_cup.duckdb"
-EXPORT_DIR = PROJECT_ROOT / "reports" / "analytics"
+LOGGER = logging.getLogger(__name__)
 
 
 def create_analytics_views(db_path: Path = DB_PATH) -> None:

@@ -23,17 +23,18 @@ from sklearn.metrics import mean_absolute_error, mean_poisson_deviance, r2_score
 from sklearn.model_selection import train_test_split
 
 try:
+    from . import settings
     from .feature_pipeline import build_feature_frame
 except ImportError:  # pragma: no cover - supports direct script execution.
+    import settings
     from feature_pipeline import build_feature_frame
 
 LOGGER = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODELS_DIR = PROJECT_ROOT / "models"
-FIGURES_DIR = PROJECT_ROOT / "reports" / "figures"
-MODEL_PATH = MODELS_DIR / "xgb_poisson_model.json"
-BEESWARM_PATH = FIGURES_DIR / "xgb_poisson_beeswarm.png"
+MODELS_DIR = settings.MODELS_DIR
+FIGURES_DIR = settings.FIGURES_DIR
+MODEL_PATH = settings.MODEL_PATH
+BEESWARM_PATH = settings.BEESWARM_PATH
 
 FEATURE_COLUMNS: tuple[str, ...] = (
     "world_cup_probability_elo_diff",

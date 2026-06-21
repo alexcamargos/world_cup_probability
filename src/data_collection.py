@@ -29,9 +29,11 @@ from bs4 import BeautifulSoup
 try:
     from .competition_filters import current_world_cup_exclusion_sql
     from .db_init import DB_PATH, RAW_DIR, initialize_database
+    from .settings import DEFAULT_FBREF_MANIFEST, DEFAULT_TRANSFERMARKT_MANIFEST
 except ImportError:  # pragma: no cover - supports direct script execution.
     from competition_filters import current_world_cup_exclusion_sql
     from db_init import DB_PATH, RAW_DIR, initialize_database
+    from settings import DEFAULT_FBREF_MANIFEST, DEFAULT_TRANSFERMARKT_MANIFEST
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,9 +42,6 @@ MATCH_RESULTS_DATASET = "martj42/international-football-results-from-1872-to-201
 DEFAULT_EA_FC_DATASET = "flynn28/eafc26-player-database"
 DEFAULT_FBREF_LEAGUES = ("INT-World Cup", "INT-European Championship")
 DEFAULT_FBREF_SEASONS = ("2010", "2014", "2018", "2022", "2024")
-PROJECT_ROOT = RAW_DIR.parents[1]
-DEFAULT_FBREF_MANIFEST = PROJECT_ROOT / "config" / "fbref_sources.json"
-DEFAULT_TRANSFERMARKT_MANIFEST = PROJECT_ROOT / "config" / "transfermarkt_teams.json"
 TRANSFERMARKT_USER_AGENT = (
     "Mozilla/5.0 (compatible; world-cup-probability-research/0.1; +https://localhost)"
 )

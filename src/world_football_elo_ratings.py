@@ -24,8 +24,10 @@ import httpx
 
 try:
     from .db_init import DB_PATH, RAW_DIR, initialize_database
+    from .settings import DEFAULT_SOURCE_USER_AGENT
 except ImportError:  # pragma: no cover - supports direct script execution.
     from db_init import DB_PATH, RAW_DIR, initialize_database
+    from settings import DEFAULT_SOURCE_USER_AGENT
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ ELORATINGS_BASE_URL = "https://www.eloratings.net"
 DEFAULT_WORLD_RATINGS_URL = f"{ELORATINGS_BASE_URL}/World.tsv"
 DEFAULT_TEAM_DICTIONARY_URL = f"{ELORATINGS_BASE_URL}/en.teams.tsv"
 DEFAULT_RAW_PATH = RAW_DIR / "eloratings" / "world_football_elo_ratings_snapshot.jsonl"
-USER_AGENT = "world-cup-probability/0.1 (+https://localhost)"
+USER_AGENT = DEFAULT_SOURCE_USER_AGENT
 
 MANUAL_TEAM_ALIASES: dict[str, tuple[str, ...]] = {
     "Cape Verde": ("Cabo Verde",),

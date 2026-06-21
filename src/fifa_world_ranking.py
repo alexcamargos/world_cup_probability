@@ -18,15 +18,17 @@ import httpx
 
 try:
     from .db_init import DB_PATH, RAW_DIR, initialize_database
+    from .settings import DEFAULT_SOURCE_USER_AGENT
 except ImportError:  # pragma: no cover - supports direct script execution.
     from db_init import DB_PATH, RAW_DIR, initialize_database
+    from settings import DEFAULT_SOURCE_USER_AGENT
 
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PAGE_URL = "https://inside.fifa.com/fifa-world-ranking/men"
 DEFAULT_API_URL = "https://api.fifa.com/api/v3/rankings?gender=1&count=300"
 DEFAULT_RAW_PATH = RAW_DIR / "fifa_world_ranking" / "men_snapshot.jsonl"
-USER_AGENT = "world-cup-probability/0.1 (+https://localhost)"
+USER_AGENT = DEFAULT_SOURCE_USER_AGENT
 
 MANUAL_TEAM_ALIASES: dict[str, tuple[str, ...]] = {
     "Côte d'Ivoire": ("Ivory Coast", "Cote d'Ivoire"),

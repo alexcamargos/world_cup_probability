@@ -15,12 +15,16 @@ from pathlib import Path
 
 import duckdb
 
+try:
+    from . import settings
+except ImportError:  # pragma: no cover - supports direct script execution.
+    import settings
+
 LOGGER = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RAW_DIR = PROJECT_ROOT / "data" / "raw"
-WAREHOUSE_DIR = PROJECT_ROOT / "data" / "warehouse"
-DB_PATH = WAREHOUSE_DIR / "world_cup.duckdb"
+RAW_DIR = settings.RAW_DIR
+WAREHOUSE_DIR = settings.WAREHOUSE_DIR
+DB_PATH = settings.DB_PATH
 
 DDL_STATEMENTS: tuple[str, ...] = (
     """

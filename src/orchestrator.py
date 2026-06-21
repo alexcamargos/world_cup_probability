@@ -21,7 +21,6 @@ try:
     from .analytics import export_analytics
     from .competition_filters import current_world_cup_exclusion_sql
     from .db_init import initialize_database
-    from .elo_engine import DB_PATH as WAREHOUSE_DB_PATH
     from .elo_engine import build_elo_history
     from .feature_pipeline import build_feature_frame
     from .fifa_world_ranking import load_fifa_world_ranking
@@ -34,6 +33,8 @@ try:
         save_model,
         train_poisson_model,
     )
+    from .settings import DB_PATH as WAREHOUSE_DB_PATH
+    from .settings import DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED
     from .simulator import TeamLambda, simulate_world_cup
     from .world_cup_2026_schedule import TEAM_COUNTRIES, TEAM_NAMES
     from .world_football_elo_ratings import load_world_football_elo_ratings
@@ -41,7 +42,6 @@ except ImportError:  # pragma: no cover - supports direct script execution.
     from analytics import export_analytics
     from competition_filters import current_world_cup_exclusion_sql
     from db_init import initialize_database
-    from elo_engine import DB_PATH as WAREHOUSE_DB_PATH
     from elo_engine import build_elo_history
     from feature_pipeline import build_feature_frame
     from fifa_world_ranking import load_fifa_world_ranking
@@ -54,15 +54,14 @@ except ImportError:  # pragma: no cover - supports direct script execution.
         save_model,
         train_poisson_model,
     )
+    from settings import DB_PATH as WAREHOUSE_DB_PATH
+    from settings import DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED
     from simulator import TeamLambda, simulate_world_cup
     from world_cup_2026_schedule import TEAM_COUNTRIES, TEAM_NAMES
     from world_football_elo_ratings import load_world_football_elo_ratings
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_ITERATIONS = 100_000
-DEFAULT_BATCH_SIZE = 2_500
-DEFAULT_SEED = 42
 MIN_WORLD_CUP_TEAMS = 48
 
 

@@ -23,6 +23,13 @@ import xgboost as xgb
 
 try:
     from .analytics import export_analytics
+    from .settings import (
+        DB_PATH,
+        DEFAULT_BATCH_SIZE,
+        DEFAULT_ITERATIONS,
+        DEFAULT_SEED,
+        MODEL_PATH,
+    )
     from .world_cup_2026_schedule import (
         TEAM_COUNTRIES,
         TEAM_NAMES,
@@ -31,6 +38,7 @@ try:
     )
 except ImportError:  # pragma: no cover - supports direct script execution.
     from analytics import export_analytics
+    from settings import DB_PATH, DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED, MODEL_PATH
     from world_cup_2026_schedule import (  # type: ignore[no-redef]
         TEAM_COUNTRIES,
         TEAM_NAMES,
@@ -40,18 +48,11 @@ except ImportError:  # pragma: no cover - supports direct script execution.
 
 LOGGER = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = PROJECT_ROOT / "data" / "warehouse" / "world_cup.duckdb"
-MODEL_PATH = PROJECT_ROOT / "models" / "xgb_poisson_model.json"
-
 HOST_ADVANTAGE_MULTIPLIER = 1.10
 REST_DAY_EDGE_MULTIPLIER = 0.03
 MAX_REST_DAY_EDGE = 3.0
 EXPECTED_TEAM_COUNT = 48
 EXPECTED_MATCH_COUNT = 104
-DEFAULT_ITERATIONS = 100_000
-DEFAULT_BATCH_SIZE = 2_500
-DEFAULT_SEED = 42
 
 
 @dataclass(frozen=True, slots=True)

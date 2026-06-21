@@ -16,13 +16,12 @@ import duckdb
 
 try:
     from .competition_filters import current_world_cup_exclusion_sql
+    from .settings import DB_PATH
 except ImportError:  # pragma: no cover - supports direct script execution.
     from competition_filters import current_world_cup_exclusion_sql
+    from settings import DB_PATH
 
 LOGGER = logging.getLogger(__name__)
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = PROJECT_ROOT / "data" / "warehouse" / "world_cup.duckdb"
 
 INITIAL_WORLD_CUP_PROBABILITY_ELO = 1500.0
 BASE_K_FACTOR = 20.0

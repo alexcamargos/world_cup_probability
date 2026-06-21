@@ -17,12 +17,22 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+try:
+    from .settings import (
+        DEFAULT_INGESTION_USER_AGENT,
+        DEFAULT_RAW_DIR,
+        DEFAULT_TIMEOUT_SECONDS,
+    )
+except ImportError:  # pragma: no cover - supports direct script execution.
+    from settings import (
+        DEFAULT_INGESTION_USER_AGENT,
+        DEFAULT_RAW_DIR,
+        DEFAULT_TIMEOUT_SECONDS,
+    )
+
 LOGGER = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RAW_DIR = PROJECT_ROOT / "data" / "raw"
-DEFAULT_TIMEOUT_SECONDS = 30.0
-DEFAULT_USER_AGENT = "world-cup-probability-ingestion/0.1"
+DEFAULT_USER_AGENT = DEFAULT_INGESTION_USER_AGENT
 CHUNK_SIZE_BYTES = 1024 * 1024
 KAGGLE_DATASETS: tuple[str, ...] = (
     "abecklas/fifa-world-cup",
