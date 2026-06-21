@@ -169,6 +169,12 @@ def test_world_football_elo_ratings_supports_feature_training_frame(tmp_path: Pa
         "world_football_elo_ratings_diff",
         "fifa_world_ranking_points_diff",
         "fifa_world_ranking_rank_diff",
+        "prior_world_cup_appearances_diff",
+        "prior_world_cup_points_per_match_diff",
+        "prior_world_cup_goal_diff_per_match_diff",
+        "prior_world_cup_yellow_cards_per_match_diff",
+        "prior_world_cup_sending_offs_per_match_diff",
+        "prior_world_cup_fair_play_penalty_per_match_diff",
         "market_value_diff",
         "avg_overall_diff",
         "avg_pace_diff",
@@ -182,6 +188,12 @@ def test_world_football_elo_ratings_supports_feature_training_frame(tmp_path: Pa
     assert row["world_football_elo_ratings_diff"] == pytest.approx(-142.0)
     assert row["fifa_world_ranking_points_diff"] == pytest.approx(100.0)
     assert row["fifa_world_ranking_rank_diff"] == pytest.approx(0.0)
+    assert row["prior_world_cup_appearances_diff"] == pytest.approx(0.0)
+    assert row["prior_world_cup_points_per_match_diff"] == pytest.approx(0.0)
+    assert row["prior_world_cup_goal_diff_per_match_diff"] == pytest.approx(0.0)
+    assert row["prior_world_cup_yellow_cards_per_match_diff"] == pytest.approx(0.0)
+    assert row["prior_world_cup_sending_offs_per_match_diff"] == pytest.approx(0.0)
+    assert row["prior_world_cup_fair_play_penalty_per_match_diff"] == pytest.approx(0.0)
     assert row["avg_overall_diff"] == pytest.approx(0.0)
     assert row["avg_pace_diff"] == pytest.approx(0.0)
     assert row["avg_stamina_diff"] == pytest.approx(0.0)
