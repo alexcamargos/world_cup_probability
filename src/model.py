@@ -38,6 +38,8 @@ BEESWARM_PATH = FIGURES_DIR / "xgb_poisson_beeswarm.png"
 FEATURE_COLUMNS: tuple[str, ...] = (
     "world_cup_probability_elo_diff",
     "world_football_elo_ratings_diff",
+    "fifa_world_ranking_points_diff",
+    "fifa_world_ranking_rank_diff",
     "market_value_diff",
     "recent_form_diff",
 )
