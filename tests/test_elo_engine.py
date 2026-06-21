@@ -18,7 +18,9 @@ def test_build_elo_history_upserts_existing_match(tmp_path: Path) -> None:
             INSERT INTO d_teams (team_id, team_name, loaded_at)
             VALUES
                 ('Brazil', 'Brazil', current_timestamp),
-                ('Argentina', 'Argentina', current_timestamp)
+                ('Argentina', 'Argentina', current_timestamp),
+                ('Scotland', 'Scotland', current_timestamp),
+                ('Morocco', 'Morocco', current_timestamp)
             """
         )
         con.execute(
@@ -32,7 +34,9 @@ def test_build_elo_history_upserts_existing_match(tmp_path: Path) -> None:
                 home_team_score,
                 away_team_score,
                 neutral_site
-            ) VALUES ('m1', DATE '2026-06-20', 'Friendly', 'Brazil', 'Argentina', 2, 1, TRUE)
+            ) VALUES
+                ('m1', DATE '2026-06-20', 'Friendly', 'Brazil', 'Argentina', 2, 1, TRUE),
+                ('m_wc', DATE '2026-06-20', 'FIFA World Cup', 'Scotland', 'Morocco', 2, 1, TRUE)
             """
         )
 
@@ -53,5 +57,13 @@ def test_build_elo_history_upserts_existing_match(tmp_path: Path) -> None:
             WHERE match_id = 'm1'
             """
         ).fetchone()
+        world_cup_rows = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM f_elo_history
+            WHERE match_id = 'm_wc'
+            """
+        ).fetchone()[0]
 
     assert row == (1, 1500.0, 1500.0, 1.0, 0.0, True)
+    assert world_cup_rows == 0
