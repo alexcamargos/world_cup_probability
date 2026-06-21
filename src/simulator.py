@@ -1,8 +1,9 @@
 """Monte Carlo simulator for the FIFA World Cup 2026 tournament path.
 
-The simulator uses the official 104-match schedule, plays the group stage,
-selects the top two teams from each group plus the eight best third-place teams,
-and resolves the published knockout slots through the final.
+The simulator uses the real 104-match schedule as the target bracket, plays the
+group stage, selects the top two teams from each group plus the eight best
+third-place teams, and resolves the knockout slots through the final. Real match
+scores from the current tournament are never used as simulation inputs.
 """
 
 from __future__ import annotations
@@ -171,7 +172,6 @@ def simulate_match(
     venue_country: str | None = None,
     home_rest_days: float | None = None,
     away_rest_days: float | None = None,
-    played_score: tuple[int, int] | None = None,
 ) -> SimulatedMatch:
     """Simulate a single match using Poisson scoring and optional penalties."""
     home_advantage = _has_host_advantage(home_team, venue_country)
@@ -189,11 +189,8 @@ def simulate_match(
         opponent_rest_days=home_rest_days,
     )
 
-    if played_score is None:
-        home_goals = int(rng.poisson(home_lambda))
-        away_goals = int(rng.poisson(away_lambda))
-    else:
-        home_goals, away_goals = played_score
+    home_goals = int(rng.poisson(home_lambda))
+    away_goals = int(rng.poisson(away_lambda))
 
     decided_by_penalties = False
     penalty_winner_team_id: str | None = None
@@ -318,9 +315,7 @@ def _should_log_simulation_progress(
     progress_interval: int,
 ) -> bool:
     return (
-        simulation_id == 1
-        or simulation_id == iterations
-        or simulation_id % progress_interval == 0
+        simulation_id == 1 or simulation_id == iterations or simulation_id % progress_interval == 0
     )
 
 
@@ -386,11 +381,6 @@ def _play_fixture(
 ) -> SimulatedMatch:
     home_rest_days = _rest_days(last_played_at.get(home_team.team_id), fixture.match_date)
     away_rest_days = _rest_days(last_played_at.get(away_team.team_id), fixture.match_date)
-    played_score = (
-        (fixture.played_home_goals, fixture.played_away_goals)
-        if fixture.played_home_goals is not None and fixture.played_away_goals is not None
-        else None
-    )
     result = simulate_match(
         home_team,
         away_team,
@@ -399,7 +389,6 @@ def _play_fixture(
         venue_country=fixture.country,
         home_rest_days=home_rest_days,
         away_rest_days=away_rest_days,
-        played_score=played_score,
     )
     result = _with_fixture_metadata(result, fixture, simulation_id)
     last_played_at[home_team.team_id] = fixture.match_date
