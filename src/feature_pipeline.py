@@ -16,9 +16,11 @@ import polars as pl
 try:
     from .competition_filters import current_world_cup_exclusion_sql
     from .settings import DB_PATH
+    from .sql_loader import render_sql_template
 except ImportError:  # pragma: no cover - supports direct script execution.
     from competition_filters import current_world_cup_exclusion_sql
     from settings import DB_PATH
+    from sql_loader import render_sql_template
 
 LOGGER = logging.getLogger(__name__)
 
@@ -231,47 +233,22 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
         else ""
     )
 
-    query = f"""
-        {squad_attributes_ctes}
-        SELECT
-            m.match_id,
-            m.match_date,
-            m.competition,
-            m.season,
-            m.stage,
-            m.home_team_id,
-            m.away_team_id,
-            m.home_team_score,
-            m.away_team_score,
-            m.neutral_site,
-            e.home_rating_before AS home_world_cup_probability_elo_before,
-            e.away_rating_before AS away_world_cup_probability_elo_before,
-            {home_world_football_elo_ratings_expr} AS home_world_football_elo_ratings,
-            {away_world_football_elo_ratings_expr} AS away_world_football_elo_ratings,
-            {home_fifa_points_expr} AS home_fifa_world_ranking_points,
-            {away_fifa_points_expr} AS away_fifa_world_ranking_points,
-            {home_fifa_rank_expr} AS home_fifa_world_ranking_rank,
-            {away_fifa_rank_expr} AS away_fifa_world_ranking_rank,
-            {home_squad_attribute_selects}
-            {away_squad_attribute_selects}
-            COALESCE(ht.market_value_eur, 0.0) AS home_market_value_eur,
-            COALESCE(awt.market_value_eur, 0.0) AS away_market_value_eur
-        FROM f_matches AS m
-        INNER JOIN f_elo_history AS e
-            ON e.match_id = m.match_id
-        {world_football_elo_ratings_joins}
-        {fifa_world_ranking_joins}
-        {squad_attribute_joins}
-        LEFT JOIN d_teams AS ht
-            ON ht.team_id = m.home_team_id
-        LEFT JOIN d_teams AS awt
-            ON awt.team_id = m.away_team_id
-        WHERE m.match_date IS NOT NULL
-          AND m.home_team_score IS NOT NULL
-          AND m.away_team_score IS NOT NULL
-          AND {current_world_cup_exclusion}
-        ORDER BY m.match_date ASC, m.match_id ASC
-    """
+    query = render_sql_template(
+        "feature_pipeline/consolidated_matches.sql.j2",
+        squad_attributes_ctes=squad_attributes_ctes,
+        home_world_football_elo_ratings_expr=home_world_football_elo_ratings_expr,
+        away_world_football_elo_ratings_expr=away_world_football_elo_ratings_expr,
+        home_fifa_points_expr=home_fifa_points_expr,
+        away_fifa_points_expr=away_fifa_points_expr,
+        home_fifa_rank_expr=home_fifa_rank_expr,
+        away_fifa_rank_expr=away_fifa_rank_expr,
+        home_squad_attribute_selects=home_squad_attribute_selects,
+        away_squad_attribute_selects=away_squad_attribute_selects,
+        world_football_elo_ratings_joins=world_football_elo_ratings_joins,
+        fifa_world_ranking_joins=fifa_world_ranking_joins,
+        squad_attribute_joins=squad_attribute_joins,
+        current_world_cup_exclusion=current_world_cup_exclusion,
+    )
     relation = con.sql(query)
     return relation.pl()
 

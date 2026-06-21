@@ -36,6 +36,7 @@ try:
     from .settings import DB_PATH as WAREHOUSE_DB_PATH
     from .settings import DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED
     from .simulator import TeamLambda, simulate_world_cup
+    from .sql_loader import render_sql_template
     from .world_cup_2026_schedule import TEAM_COUNTRIES, TEAM_NAMES
     from .world_football_elo_ratings import load_world_football_elo_ratings
 except ImportError:  # pragma: no cover - supports direct script execution.
@@ -57,6 +58,7 @@ except ImportError:  # pragma: no cover - supports direct script execution.
     from settings import DB_PATH as WAREHOUSE_DB_PATH
     from settings import DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED
     from simulator import TeamLambda, simulate_world_cup
+    from sql_loader import render_sql_template
     from world_cup_2026_schedule import TEAM_COUNTRIES, TEAM_NAMES
     from world_football_elo_ratings import load_world_football_elo_ratings
 
@@ -339,115 +341,21 @@ def _build_team_lambdas(
             date_expr="m.match_date",
             competition_expr="m.competition",
         )
-        query = f"""
-            WITH team_match_history AS (
-                SELECT
-                    match_id,
-                    match_date,
-                    home_team_id AS team_id,
-                    home_team_score AS goals_for,
-                    away_team_score AS goals_against
-                FROM f_matches
-                WHERE {match_history_exclusion}
-                UNION ALL
-                SELECT
-                    match_id,
-                    match_date,
-                    away_team_id AS team_id,
-                    away_team_score AS goals_for,
-                    home_team_score AS goals_against
-                FROM f_matches
-                WHERE {match_history_exclusion}
-            ),
-            latest_world_cup_probability_elo AS (
-                SELECT team_id, world_cup_probability_elo_now
-                FROM (
-                    SELECT
-                        team_id,
-                        world_cup_probability_elo_now,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY team_id
-                            ORDER BY match_date DESC, match_id DESC
-                        ) AS rn
-                    FROM (
-                        SELECT
-                            e.match_id,
-                            e.match_date,
-                            e.home_team_id AS team_id,
-                            e.home_rating_after AS world_cup_probability_elo_now
-                        FROM f_elo_history AS e
-                        INNER JOIN f_matches AS m
-                            ON m.match_id = e.match_id
-                        WHERE {elo_history_exclusion}
-                        UNION ALL
-                        SELECT
-                            e.match_id,
-                            e.match_date,
-                            e.away_team_id AS team_id,
-                            e.away_rating_after AS world_cup_probability_elo_now
-                        FROM f_elo_history AS e
-                        INNER JOIN f_matches AS m
-                            ON m.match_id = e.match_id
-                        WHERE {elo_history_exclusion}
-                    ) AS elo_union
-                ) AS ranked
-                WHERE rn = 1
-            ),
-            {world_football_elo_ratings_cte}
-            {fifa_world_ranking_cte}
-            {squad_attributes_ctes}
-            recent_form AS (
-                SELECT
-                    team_id,
-                    COALESCE(
-                        AVG(goals_for) OVER (
-                            PARTITION BY team_id
-                            ORDER BY match_date, match_id
-                            ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
-                        ),
-                        0.0
-                    ) AS goals_for_last5,
-                    COALESCE(
-                        AVG(goals_against) OVER (
-                            PARTITION BY team_id
-                            ORDER BY match_date, match_id
-                            ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
-                        ),
-                        0.0
-                    ) AS goals_against_last5,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY team_id
-                        ORDER BY match_date DESC, match_id DESC
-                    ) AS rn
-                FROM team_match_history
-            ),
-            latest_form AS (
-                SELECT
-                    team_id,
-                    goals_for_last5 - goals_against_last5 AS recent_form
-                FROM recent_form
-                WHERE rn = 1
-            )
-            SELECT
-                t.team_id,
-                t.team_name,
-                COALESCE(le.world_cup_probability_elo_now, 1500.0) AS world_cup_probability_elo_now,
-                {world_football_elo_ratings_select},
-                {fifa_world_ranking_points_select},
-                {fifa_world_ranking_rank_select},
-                COALESCE(t.market_value_eur, 0.0) AS market_value_eur,
-                {squad_attributes_select}
-                COALESCE(lf.recent_form, 0.0) AS recent_form
-            FROM d_teams AS t
-            LEFT JOIN latest_world_cup_probability_elo AS le
-                ON le.team_id = t.team_id
-            {world_football_elo_ratings_join}
-            {fifa_world_ranking_join}
-            {squad_attributes_join}
-            LEFT JOIN latest_form AS lf
-                ON lf.team_id = t.team_id
-            ORDER BY world_cup_probability_elo_now DESC, market_value_eur DESC, team_name ASC
-        """
+        query = render_sql_template(
+            "orchestrator/team_lambdas.sql.j2",
+            match_history_exclusion=match_history_exclusion,
+            elo_history_exclusion=elo_history_exclusion,
+            world_football_elo_ratings_cte=world_football_elo_ratings_cte,
+            fifa_world_ranking_cte=fifa_world_ranking_cte,
+            squad_attributes_ctes=squad_attributes_ctes,
+            world_football_elo_ratings_select=world_football_elo_ratings_select,
+            fifa_world_ranking_points_select=fifa_world_ranking_points_select,
+            fifa_world_ranking_rank_select=fifa_world_ranking_rank_select,
+            squad_attributes_select=squad_attributes_select,
+            world_football_elo_ratings_join=world_football_elo_ratings_join,
+            fifa_world_ranking_join=fifa_world_ranking_join,
+            squad_attributes_join=squad_attributes_join,
+        )
         team_frame = con.sql(query).pl()
 
     if team_frame.height < MIN_WORLD_CUP_TEAMS:
