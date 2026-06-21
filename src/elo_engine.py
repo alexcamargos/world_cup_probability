@@ -288,7 +288,7 @@ def _upsert_history(
             competition_weight = excluded.competition_weight,
             home_advantage_points = excluded.home_advantage_points,
             neutral_site = excluded.neutral_site,
-            updated_at = current_timestamp;
+            updated_at = now();
         """,
         [
             match.match_id,
