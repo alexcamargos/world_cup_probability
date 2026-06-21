@@ -263,9 +263,39 @@ def _load_round_probabilities(
                 s.home_team_name,
                 s.away_team_id,
                 s.away_team_name
+        ),
+        score_stats AS (
+            SELECT
+                s.match_number,
+                s.home_team_id,
+                s.away_team_id,
+                s.home_goals AS predicted_home_goals,
+                s.away_goals AS predicted_away_goals,
+                COUNT(*) AS score_appearances,
+                ROW_NUMBER() OVER (
+                    PARTITION BY s.match_number, s.home_team_id, s.away_team_id
+                    ORDER BY COUNT(*) DESC, s.home_goals + s.away_goals ASC, s.home_goals DESC
+                ) AS score_rank
+            FROM selected AS s
+            GROUP BY
+                s.match_number,
+                s.home_team_id,
+                s.away_team_id,
+                s.home_goals,
+                s.away_goals
         )
-        SELECT *
-        FROM pair_stats
+        SELECT
+            p.*,
+            ss.predicted_home_goals,
+            ss.predicted_away_goals,
+            ROUND(100.0 * ss.score_appearances / NULLIF(p.appearances, 0), 2)
+                AS score_occurrence_pct
+        FROM pair_stats AS p
+        LEFT JOIN score_stats AS ss
+            ON ss.match_number = p.match_number
+            AND ss.home_team_id = p.home_team_id
+            AND ss.away_team_id = p.away_team_id
+            AND ss.score_rank = 1
         ORDER BY match_number ASC, appearances DESC, home_team_name ASC, away_team_name ASC
     """
     with duckdb.connect(db_path, read_only=True) as con:
@@ -362,6 +392,7 @@ def _group_round_match_numbers(fixtures: tuple[WorldCupFixture, ...]) -> dict[in
 
 
 def _localize_rows(rows: list[dict[str, Any]], selected_round: RoundOption) -> list[dict[str, Any]]:
+    fixtures_by_match = {fixture.match_number: fixture for fixture in world_cup_2026_fixtures()}
     localized = []
     for row in rows:
         display_row = dict(row)
@@ -372,6 +403,7 @@ def _localize_rows(rows: list[dict[str, Any]], selected_round: RoundOption) -> l
             row["away_team_id"], row["away_team_name"]
         )
         display_row["bucket"] = _bucket_label(row, selected_round)
+        _add_played_fixture_result(display_row, fixtures_by_match)
         localized.append(display_row)
     if selected_round.first_column_header == "Grupo":
         localized.sort(key=lambda row: (str(row["bucket"]), int(row["match_number"])))
@@ -388,6 +420,54 @@ def _team_display_name(team_id: str, fallback: str) -> str:
     return TEAM_NAMES_PT_BR.get(team_id, fallback)
 
 
+def _add_played_fixture_result(
+    row: dict[str, Any],
+    fixtures_by_match: dict[int, WorldCupFixture],
+) -> None:
+    fixture = fixtures_by_match.get(int(row["match_number"]))
+    row["actual_home_goals"] = None
+    row["actual_away_goals"] = None
+    row["prediction_result"] = None
+    if (
+        fixture is None
+        or fixture.played_home_goals is None
+        or fixture.played_away_goals is None
+        or fixture.home_slot != row["home_team_id"]
+        or fixture.away_slot != row["away_team_id"]
+    ):
+        return
+
+    row["actual_home_goals"] = fixture.played_home_goals
+    row["actual_away_goals"] = fixture.played_away_goals
+    row["prediction_result"] = _prediction_result(row)
+
+
+def _prediction_result(row: dict[str, Any]) -> str | None:
+    predicted_home_goals = row.get("predicted_home_goals")
+    predicted_away_goals = row.get("predicted_away_goals")
+    actual_home_goals = row.get("actual_home_goals")
+    actual_away_goals = row.get("actual_away_goals")
+    if (
+        predicted_home_goals is None
+        or predicted_away_goals is None
+        or actual_home_goals is None
+        or actual_away_goals is None
+    ):
+        return None
+
+    predicted_outcome = _score_outcome(int(predicted_home_goals), int(predicted_away_goals))
+    actual_outcome = _score_outcome(int(actual_home_goals), int(actual_away_goals))
+    return "Acerto" if predicted_outcome == actual_outcome else "Erro"
+
+
+def _score_outcome(home_goals: int, away_goals: int) -> str:
+    if home_goals > away_goals:
+        return "home"
+    if away_goals > home_goals:
+        return "away"
+    return "draw"
+
+
 def _probability_table_html(
     rows: list[dict[str, Any]],
     *,
@@ -402,6 +482,9 @@ def _probability_table_html(
         header_cells.append(_header_cell("Ocorr. (%)"))
     header_cells.extend(
         [
+            _header_cell("Placar<br>modelo"),
+            _header_cell("Placar<br>real"),
+            _header_cell("Modelo<br>vs real"),
             _header_cell("Vitoria<br>Time 1 (%)"),
             _header_cell("Empate (%)"),
             _header_cell("Vitoria<br>Time 2 (%)"),
@@ -426,6 +509,12 @@ def _probability_table_html(
             cells.append(f'<td class="numeric-cell">{_format_pct(row["occurrence_pct"])}</td>')
         cells.extend(
             [
+                f'<td class="score-cell">{html.escape(_format_score(row))}</td>',
+                (
+                    '<td class="score-cell actual-score">'
+                    f"{html.escape(_format_actual_score(row))}</td>"
+                ),
+                _prediction_result_cell(row),
                 f'<td class="numeric-cell">{_format_pct(row["home_win_pct"])}</td>',
                 f'<td class="numeric-cell">{_format_pct(row["draw_pct"])}</td>',
                 f'<td class="numeric-cell">{_format_pct(row["away_win_pct"])}</td>',
@@ -460,6 +549,30 @@ def _format_pct(value: Any) -> str:
     return f"{float(value or 0):.2f}"
 
 
+def _format_score(row: dict[str, Any]) -> str:
+    home_goals = row.get("predicted_home_goals")
+    away_goals = row.get("predicted_away_goals")
+    if home_goals is None or away_goals is None:
+        return "-"
+    return f"{int(home_goals)} x {int(away_goals)}"
+
+
+def _format_actual_score(row: dict[str, Any]) -> str:
+    home_goals = row.get("actual_home_goals")
+    away_goals = row.get("actual_away_goals")
+    if home_goals is None or away_goals is None:
+        return "-"
+    return f"{int(home_goals)} x {int(away_goals)}"
+
+
+def _prediction_result_cell(row: dict[str, Any]) -> str:
+    result = row.get("prediction_result")
+    if result is None:
+        return '<td class="result-cell result-pending">-</td>'
+    css_class = "result-hit" if result == "Acerto" else "result-miss"
+    return f'<td class="result-cell {css_class}">{html.escape(str(result))}</td>'
+
+
 def _friendly_db_error(exc: Exception, db_path: Path) -> str:
     message = str(exc)
     if "used by another process" in message or "sendo usado por outro processo" in message:
@@ -484,7 +597,7 @@ def _inject_styles() -> None:
         }
         .prob-table {
             width: 100%;
-            min-width: 860px;
+            min-width: 1180px;
             border-collapse: collapse;
             font-size: 16px;
             line-height: 1.25;
@@ -530,6 +643,31 @@ def _inject_styles() -> None:
             min-width: 120px;
             text-align: center;
             font-variant-numeric: tabular-nums;
+        }
+        .prob-table .score-cell {
+            min-width: 110px;
+            text-align: center;
+            color: #1d2127;
+            font-weight: 800;
+            font-variant-numeric: tabular-nums;
+        }
+        .prob-table .actual-score {
+            color: #38445c;
+        }
+        .prob-table .result-cell {
+            min-width: 118px;
+            text-align: center;
+            font-weight: 800;
+        }
+        .prob-table .result-hit {
+            color: #11683b;
+        }
+        .prob-table .result-miss {
+            color: #a93535;
+        }
+        .prob-table .result-pending {
+            color: #8993a5;
+            font-weight: 600;
         }
         </style>
         """,
