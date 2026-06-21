@@ -1,0 +1,203 @@
+{
+  "teams": [
+    {
+      "team_id": "Algeria",
+      "team_name": "Algeria"
+    },
+    {
+      "team_id": "Argentina",
+      "team_name": "Argentina"
+    },
+    {
+      "team_id": "Australia",
+      "team_name": "Australia"
+    },
+    {
+      "team_id": "Austria",
+      "team_name": "Austria"
+    },
+    {
+      "team_id": "Belgium",
+      "team_name": "Belgium"
+    },
+    {
+      "team_id": "Bosnia and Herzegovina",
+      "team_name": "Bosnia and Herzegovina",
+      "search_query": "Bosnia-Herzegovina"
+    },
+    {
+      "team_id": "Brazil",
+      "team_name": "Brazil"
+    },
+    {
+      "team_id": "Canada",
+      "team_name": "Canada"
+    },
+    {
+      "team_id": "Cape Verde",
+      "team_name": "Cape Verde",
+      "search_query": "Cape Verde"
+    },
+    {
+      "team_id": "Colombia",
+      "team_name": "Colombia"
+    },
+    {
+      "team_id": "Croatia",
+      "team_name": "Croatia"
+    },
+    {
+      "team_id": "Curaçao",
+      "team_name": "Curaçao",
+      "search_query": "Curacao"
+    },
+    {
+      "team_id": "Czech Republic",
+      "team_name": "Czech Republic"
+    },
+    {
+      "team_id": "DR Congo",
+      "team_name": "DR Congo",
+      "search_query": "DR Congo"
+    },
+    {
+      "team_id": "Ecuador",
+      "team_name": "Ecuador"
+    },
+    {
+      "team_id": "Egypt",
+      "team_name": "Egypt"
+    },
+    {
+      "team_id": "England",
+      "team_name": "England"
+    },
+    {
+      "team_id": "France",
+      "team_name": "France"
+    },
+    {
+      "team_id": "Germany",
+      "team_name": "Germany"
+    },
+    {
+      "team_id": "Ghana",
+      "team_name": "Ghana"
+    },
+    {
+      "team_id": "Haiti",
+      "team_name": "Haiti"
+    },
+    {
+      "team_id": "Iran",
+      "team_name": "Iran"
+    },
+    {
+      "team_id": "Iraq",
+      "team_name": "Iraq"
+    },
+    {
+      "team_id": "Ivory Coast",
+      "team_name": "Ivory Coast",
+      "search_query": "Cote d'Ivoire"
+    },
+    {
+      "team_id": "Japan",
+      "team_name": "Japan"
+    },
+    {
+      "team_id": "Jordan",
+      "team_name": "Jordan"
+    },
+    {
+      "team_id": "Mexico",
+      "team_name": "Mexico"
+    },
+    {
+      "team_id": "Morocco",
+      "team_name": "Morocco"
+    },
+    {
+      "team_id": "Netherlands",
+      "team_name": "Netherlands"
+    },
+    {
+      "team_id": "New Zealand",
+      "team_name": "New Zealand"
+    },
+    {
+      "team_id": "Norway",
+      "team_name": "Norway"
+    },
+    {
+      "team_id": "Panama",
+      "team_name": "Panama"
+    },
+    {
+      "team_id": "Paraguay",
+      "team_name": "Paraguay"
+    },
+    {
+      "team_id": "Portugal",
+      "team_name": "Portugal"
+    },
+    {
+      "team_id": "Qatar",
+      "team_name": "Qatar"
+    },
+    {
+      "team_id": "Saudi Arabia",
+      "team_name": "Saudi Arabia"
+    },
+    {
+      "team_id": "Scotland",
+      "team_name": "Scotland"
+    },
+    {
+      "team_id": "Senegal",
+      "team_name": "Senegal"
+    },
+    {
+      "team_id": "South Africa",
+      "team_name": "South Africa"
+    },
+    {
+      "team_id": "South Korea",
+      "team_name": "South Korea"
+    },
+    {
+      "team_id": "Spain",
+      "team_name": "Spain"
+    },
+    {
+      "team_id": "Sweden",
+      "team_name": "Sweden"
+    },
+    {
+      "team_id": "Switzerland",
+      "team_name": "Switzerland"
+    },
+    {
+      "team_id": "Tunisia",
+      "team_name": "Tunisia"
+    },
+    {
+      "team_id": "Turkey",
+      "team_name": "Turkey",
+      "search_query": "Turkiye"
+    },
+    {
+      "team_id": "United States",
+      "team_name": "United States",
+      "search_query": "United States"
+    },
+    {
+      "team_id": "Uruguay",
+      "team_name": "Uruguay"
+    },
+    {
+      "team_id": "Uzbekistan",
+      "team_name": "Uzbekistan"
+    }
+  ]
+}
