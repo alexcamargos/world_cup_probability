@@ -33,15 +33,19 @@ Ordem recomendada:
    - `uv run world-football-elo-ratings`
    - Para recarregar um snapshot local sem rede:
      `uv run world-football-elo-ratings --load-existing --raw-path data/raw/eloratings/world_football_elo_ratings_snapshot.jsonl`
-7. Gerar a base de features:
+7. Carregar o FIFA World Ranking:
+   - `uv run fifa-world-ranking`
+   - Para recarregar um snapshot local sem rede:
+     `uv run fifa-world-ranking --load-existing --raw-path data/raw/fifa_world_ranking/men_snapshot.jsonl`
+8. Gerar a base de features:
    - `uv run features`
-8. Treinar o modelo Poisson e gerar SHAP:
+9. Treinar o modelo Poisson e gerar SHAP:
    - `uv run train-model`
-9. Rodar a simulação Monte Carlo:
+10. Rodar a simulação Monte Carlo:
    - `uv run simulate`
-10. Gerar as análises e CSVs:
+11. Gerar as análises e CSVs:
    - `uv run analytics`
-11. Orquestrar tudo em sequência:
+12. Orquestrar tudo em sequência:
    - `uv run pipeline --iterations 100000 --batch-size 2500`
 
 Por regra de negócio, a coleta histórica carrega apenas partidas em ou após
@@ -68,6 +72,18 @@ públicos do site (`World.tsv` e `en.teams.tsv`) e persiste as tabelas
 `world_cup_probability_elo_diff`; se o snapshot ainda não estiver carregado, a
 geração de features usa o World Cup Probability Elo como fallback para manter o
 pipeline executável.
+
+O comando `fifa-world-ranking` baixa o snapshot masculino atual do
+[FIFA World Ranking](https://inside.fifa.com/fifa-world-ranking/men), persiste
+as tabelas `d_fifa_world_ranking` e `d_fifa_world_ranking_team_aliases`, e
+mantém a data da última atualização oficial e da próxima atualização oficial no
+warehouse. Na página oficial consultada, a última atualização é 11 de junho de
+2026 e a próxima é 20 de julho de 2026. As features
+`fifa_world_ranking_points_diff` e `fifa_world_ranking_rank_diff` entram no
+treino junto com `world_cup_probability_elo_diff` e
+`world_football_elo_ratings_diff`; se o snapshot ainda não estiver carregado,
+a geração de features usa o World Cup Probability Elo como fallback para pontos
+e rank neutro para manter o pipeline executável.
 
 Os manifestos padrão ficam em:
 
