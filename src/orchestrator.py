@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,7 @@ try:
         train_poisson_model,
     )
     from .simulator import TeamLambda, simulate_world_cup
+    from .world_cup_2026_schedule import TEAM_COUNTRIES, TEAM_NAMES
     from .world_football_elo_ratings import load_world_football_elo_ratings
 except ImportError:  # pragma: no cover - supports direct script execution.
     from analytics import export_analytics
@@ -51,6 +53,7 @@ except ImportError:  # pragma: no cover - supports direct script execution.
         train_poisson_model,
     )
     from simulator import TeamLambda, simulate_world_cup
+    from world_cup_2026_schedule import TEAM_COUNTRIES, TEAM_NAMES
     from world_football_elo_ratings import load_world_football_elo_ratings
 
 LOGGER = logging.getLogger(__name__)
@@ -58,7 +61,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_ITERATIONS = 100_000
 DEFAULT_BATCH_SIZE = 2_500
 DEFAULT_SEED = 42
-MIN_WORLD_CUP_TEAMS = 32
+MIN_WORLD_CUP_TEAMS = 48
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,17 +494,7 @@ def _build_team_lambdas(
     predictions = model.predict(scored_frame.select(list(FEATURE_COLUMNS)).to_numpy())
     scored_frame = scored_frame.with_columns(pl.Series("lambda_goals", predictions))
 
-    top_teams = scored_frame.sort("lambda_goals", descending=True).head(MIN_WORLD_CUP_TEAMS)
-    seeded = _seed_bracket(top_teams)
-
-    return [
-        TeamLambda(
-            team_id=row["team_id"],
-            team_name=row["team_name"],
-            lambda_goals=float(row["lambda_goals"]),
-        )
-        for row in seeded.to_dicts()
-    ]
+    return _world_cup_2026_team_lambdas(scored_frame)
 
 
 def _seed_bracket(team_frame: pl.DataFrame) -> pl.DataFrame:
@@ -520,6 +513,71 @@ def _seed_bracket(team_frame: pl.DataFrame) -> pl.DataFrame:
         right -= 1
 
     return pl.DataFrame(bracket_rows)
+
+
+def _world_cup_2026_team_lambdas(scored_frame: pl.DataFrame) -> list[TeamLambda]:
+    """Return lambdas for the 48 official FIFA World Cup 2026 participants."""
+    rows = scored_frame.to_dicts()
+    lookup: dict[str, dict[str, object]] = {}
+    for row in rows:
+        lookup[_normalize_team_key(str(row["team_id"]))] = row
+        lookup[_normalize_team_key(str(row["team_name"]))] = row
+
+    average_lambda = float(scored_frame.get_column("lambda_goals").mean() or 1.0)
+    team_lambdas: list[TeamLambda] = []
+    missing_codes: list[str] = []
+
+    for code, official_name in sorted(TEAM_NAMES.items()):
+        row = next(
+            (
+                lookup[key]
+                for key in _official_team_lookup_keys(code, official_name)
+                if key in lookup
+            ),
+            None,
+        )
+        if row is None:
+            lambda_goals = average_lambda
+            missing_codes.append(code)
+        else:
+            lambda_goals = float(row["lambda_goals"])
+        team_lambdas.append(
+            TeamLambda(
+                team_id=code,
+                team_name=official_name,
+                lambda_goals=lambda_goals,
+                country_code=TEAM_COUNTRIES.get(code, code),
+            )
+        )
+
+    if missing_codes:
+        LOGGER.warning(
+            "Using average lambda for World Cup 2026 teams missing from warehouse: %s",
+            ", ".join(f"{code} ({TEAM_NAMES[code]})" for code in missing_codes),
+        )
+
+    return team_lambdas
+
+
+def _official_team_lookup_keys(code: str, official_name: str) -> tuple[str, ...]:
+    aliases = {
+        "BIH": ("Bosnia", "Bosnia-Herzegovina", "Bosnia and Herzegovina"),
+        "CIV": ("Ivory Coast", "Cote d'Ivoire", "Côte d'Ivoire"),
+        "COD": ("DR Congo", "Congo DR", "Congo Democratic Republic"),
+        "CPV": ("Cape Verde", "Cabo Verde"),
+        "CZE": ("Czech Republic", "Czechia"),
+        "IRN": ("Iran", "IR Iran"),
+        "KOR": ("South Korea", "Korea Republic"),
+        "RSA": ("South Africa",),
+        "TUR": ("Turkey", "Türkiye"),
+        "USA": ("United States", "USA", "USMNT"),
+    }
+    names = (code, official_name, *aliases.get(code, ()))
+    return tuple(_normalize_team_key(name) for name in names)
+
+
+def _normalize_team_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
 def _world_football_elo_ratings_tables_available(con: duckdb.DuckDBPyConnection) -> bool:
