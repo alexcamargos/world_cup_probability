@@ -7,10 +7,12 @@ from pathlib import Path
 import duckdb
 import pytest
 
+import src.fifa_world_ranking as fifa_world_ranking
 from src.db_init import initialize_database
 from src.elo_engine import initialize_elo_history
 from src.feature_pipeline import build_feature_frame
 from src.fifa_world_ranking import (
+    load_fifa_world_ranking,
     parse_fifa_world_ranking_api,
     parse_update_dates,
     persist_fifa_world_ranking_snapshot,
@@ -89,6 +91,31 @@ def test_fifa_world_ranking_raw_round_trip(tmp_path: Path) -> None:
     assert loaded.rows == snapshot.rows
     assert loaded.aliases == snapshot.aliases
     assert any(alias.team_alias == "Brazil" for alias in loaded.aliases)
+
+
+def test_fifa_world_ranking_load_skips_download_when_raw_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = parse_fifa_world_ranking_api(
+        _sample_api_payload(),
+        ranking_date=date(2026, 6, 11),
+        next_update_date=date(2026, 7, 20),
+    )
+    raw_path = tmp_path / "raw" / "fifa_world_ranking" / "men_snapshot.jsonl"
+    write_fifa_world_ranking_raw(snapshot, raw_path)
+
+    def fail_fetch(*args: object, **kwargs: object) -> object:
+        raise AssertionError("FIFA World Ranking download should not run.")
+
+    monkeypatch.setattr(fifa_world_ranking, "fetch_fifa_world_ranking_snapshot", fail_fetch)
+
+    rows_loaded = load_fifa_world_ranking(
+        db_path=tmp_path / "warehouse" / "world_cup.duckdb",
+        raw_path=raw_path,
+    )
+
+    assert rows_loaded == 2
 
 
 def test_fifa_world_ranking_supports_feature_training_frame(tmp_path: Path) -> None:
