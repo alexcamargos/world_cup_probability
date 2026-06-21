@@ -14,6 +14,11 @@ from pathlib import Path
 
 import duckdb
 
+try:
+    from .competition_filters import current_world_cup_exclusion_sql
+except ImportError:  # pragma: no cover - supports direct script execution.
+    from competition_filters import current_world_cup_exclusion_sql
+
 LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -111,6 +116,7 @@ def build_elo_history(
 
     with duckdb.connect(str(db_path)) as con:
         _ensure_matches_exist(con)
+        _delete_current_world_cup_history(con)
         matches = _load_matches(con)
         ratings: dict[str, float] = {}
 
@@ -163,6 +169,23 @@ def _ensure_matches_exist(con: duckdb.DuckDBPyConnection) -> None:
         LOGGER.warning("f_matches is empty. World Cup Probability Elo will not be generated.")
 
 
+def _delete_current_world_cup_history(con: duckdb.DuckDBPyConnection) -> None:
+    current_world_cup_exclusion = current_world_cup_exclusion_sql(
+        date_expr="match_date",
+        competition_expr="competition",
+    )
+    con.execute(
+        f"""
+        DELETE FROM f_elo_history
+        WHERE match_id IN (
+            SELECT match_id
+            FROM f_matches
+            WHERE NOT {current_world_cup_exclusion}
+        )
+        """,
+    )
+
+
 def _load_matches(con: duckdb.DuckDBPyConnection) -> list[MatchRecord]:
     null_dates = con.execute(
         "SELECT COUNT(*) FROM f_matches WHERE match_date IS NULL",
@@ -170,7 +193,11 @@ def _load_matches(con: duckdb.DuckDBPyConnection) -> list[MatchRecord]:
     if int(null_dates) > 0:
         raise ValueError("f_matches contains rows with NULL match_date.")
 
-    query = """
+    current_world_cup_exclusion = current_world_cup_exclusion_sql(
+        date_expr="match_date",
+        competition_expr="competition",
+    )
+    query = f"""
         SELECT
             match_id,
             match_date,
@@ -183,6 +210,10 @@ def _load_matches(con: duckdb.DuckDBPyConnection) -> list[MatchRecord]:
             away_team_score,
             neutral_site
         FROM f_matches
+        WHERE
+            home_team_score IS NOT NULL
+            AND away_team_score IS NOT NULL
+            AND {current_world_cup_exclusion}
         ORDER BY match_date ASC, match_id ASC, home_team_id ASC, away_team_id ASC
     """
     rows = con.execute(query).fetchall()
