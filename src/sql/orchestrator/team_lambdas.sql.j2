@@ -57,6 +57,8 @@ latest_world_cup_probability_elo AS (
 {{ world_football_elo_ratings_cte }}
 {{ fifa_world_ranking_cte }}
 {{ squad_attributes_ctes }}
+{{ world_cup_prior_history_cte }}
+{{ world_cup_prior_discipline_cte }}
 recent_form AS (
     SELECT
         team_id,
@@ -97,6 +99,8 @@ SELECT
     {{ world_football_elo_ratings_select }},
     {{ fifa_world_ranking_points_select }},
     {{ fifa_world_ranking_rank_select }},
+    {{ world_cup_prior_history_selects }}
+    {{ world_cup_prior_discipline_selects }}
     COALESCE(t.market_value_eur, 0.0) AS market_value_eur,
     {{ squad_attributes_select }}
     COALESCE(lf.recent_form, 0.0) AS recent_form
@@ -105,6 +109,8 @@ LEFT JOIN latest_world_cup_probability_elo AS le
     ON t.team_id = le.team_id
 {{ world_football_elo_ratings_join }}
 {{ fifa_world_ranking_join }}
+{{ world_cup_prior_history_join }}
+{{ world_cup_prior_discipline_join }}
 {{ squad_attributes_join }}
 LEFT JOIN latest_form AS lf
     ON t.team_id = lf.team_id
