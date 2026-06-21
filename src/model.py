@@ -6,9 +6,12 @@ team, using the regression features prepared by ``feature_pipeline``.
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 
@@ -20,7 +23,6 @@ import polars as pl
 import shap
 import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, mean_poisson_deviance, r2_score
-from sklearn.model_selection import train_test_split
 
 try:
     from . import settings
@@ -35,6 +37,8 @@ MODELS_DIR = settings.MODELS_DIR
 FIGURES_DIR = settings.FIGURES_DIR
 MODEL_PATH = settings.MODEL_PATH
 BEESWARM_PATH = settings.BEESWARM_PATH
+BEST_PARAMS_PATH = MODELS_DIR / "xgb_poisson_best_params.json"
+WORLD_CUP_2026_HOLDOUT_METRICS_PATH = MODELS_DIR / "world_cup_2026_holdout_metrics.json"
 
 FEATURE_COLUMNS: tuple[str, ...] = (
     "world_cup_probability_elo_diff",
@@ -49,6 +53,24 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "recent_form_diff",
 )
 TARGET_COLUMN = "target"
+MATCH_DATE_COLUMN = "match_date"
+CURRENT_WORLD_CUP_COLUMN = "is_current_world_cup"
+DEFAULT_VALIDATION_FRACTION = 0.2
+DEFAULT_OPTUNA_TRIALS = 50
+DEFAULT_XGB_PARAMS: dict[str, Any] = {
+    "objective": "count:poisson",
+    "n_estimators": 500,
+    "learning_rate": 0.03,
+    "max_depth": 4,
+    "min_child_weight": 1.0,
+    "subsample": 0.9,
+    "colsample_bytree": 0.9,
+    "reg_alpha": 0.0,
+    "reg_lambda": 1.0,
+    "tree_method": "hist",
+    "eval_metric": "poisson-nloglik",
+    "random_state": 42,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,76 +79,179 @@ class ModelArtifacts:
 
     model_path: Path
     beeswarm_path: Path
+    best_params_path: Path | None = None
+    holdout_metrics_path: Path | None = None
 
 
 def load_training_frame(db_path: Path | None = None) -> pl.DataFrame:
     """Load and validate the training dataset."""
-    frame = build_feature_frame() if db_path is None else build_feature_frame(db_path)
+    frame = (
+        build_feature_frame(include_metadata=True)
+        if db_path is None
+        else build_feature_frame(db_path, include_metadata=True)
+    )
 
     frame = frame.drop_nulls()
-    missing_columns = [
-        column for column in (*FEATURE_COLUMNS, TARGET_COLUMN) if column not in frame.columns
-    ]
+    required_columns = (*FEATURE_COLUMNS, TARGET_COLUMN, MATCH_DATE_COLUMN)
+    missing_columns = [column for column in required_columns if column not in frame.columns]
     if missing_columns:
         raise RuntimeError(f"Training frame is missing columns: {', '.join(missing_columns)}")
 
     if frame.height == 0:
         raise RuntimeError("Training frame is empty after null filtering.")
 
-    return frame
+    return _historical_training_frame(frame)
+
+
+def load_current_world_cup_holdout_frame(db_path: Path | None = None) -> pl.DataFrame:
+    """Load scored 2026 World Cup rows for final holdout evaluation only."""
+    frame = (
+        build_feature_frame(include_current_world_cup=True, include_metadata=True)
+        if db_path is None
+        else build_feature_frame(
+            db_path,
+            include_current_world_cup=True,
+            include_metadata=True,
+        )
+    ).drop_nulls()
+
+    if CURRENT_WORLD_CUP_COLUMN not in frame.columns:
+        raise RuntimeError(f"Holdout frame is missing column: {CURRENT_WORLD_CUP_COLUMN}")
+
+    return frame.filter(pl.col(CURRENT_WORLD_CUP_COLUMN))
+
+
+def _historical_training_frame(frame: pl.DataFrame) -> pl.DataFrame:
+    """Return only rows allowed for fitting/tuning the model."""
+    if CURRENT_WORLD_CUP_COLUMN in frame.columns:
+        frame = frame.filter(~pl.col(CURRENT_WORLD_CUP_COLUMN))
+
+    if frame.height == 0:
+        raise RuntimeError("Training frame has no historical rows outside the 2026 World Cup.")
+
+    sort_columns = [MATCH_DATE_COLUMN]
+    if "match_id" in frame.columns:
+        sort_columns.append("match_id")
+    return frame.sort(sort_columns)
 
 
 def prepare_matrices(
     frame: pl.DataFrame,
+    *,
+    validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """Split the Polars frame into train and validation numpy matrices."""
-    feature_frame = frame.select(list(FEATURE_COLUMNS))
-    target = frame.get_column(TARGET_COLUMN).cast(pl.Float64)
+    """Split the historical frame into temporal train and validation matrices."""
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be greater than 0 and less than 1.")
 
-    X = feature_frame.to_numpy()
-    y = target.to_numpy()
-    feature_names = list(FEATURE_COLUMNS)
+    frame = _historical_training_frame(frame)
+    if frame.height < 2:
+        raise RuntimeError("At least two historical rows are required for temporal validation.")
 
-    X_train, X_valid, y_train, y_valid = train_test_split(
-        X,
-        y,
-        test_size=0.2,
-        random_state=42,
-    )
+    split_index = int(frame.height * (1.0 - validation_fraction))
+    split_index = min(max(split_index, 1), frame.height - 1)
+
+    train_frame = frame.slice(0, split_index)
+    valid_frame = frame.slice(split_index)
+
+    X_train, y_train, feature_names = prepare_full_training_matrix(train_frame)
+    X_valid, y_valid, _ = prepare_full_training_matrix(valid_frame)
 
     return X_train, X_valid, y_train, y_valid, feature_names
+
+
+def prepare_full_training_matrix(frame: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Build matrices from all rows in the provided frame."""
+    missing_columns = [
+        column for column in (*FEATURE_COLUMNS, TARGET_COLUMN) if column not in frame.columns
+    ]
+    if missing_columns:
+        raise RuntimeError(f"Frame is missing columns: {', '.join(missing_columns)}")
+
+    feature_frame = frame.select(list(FEATURE_COLUMNS))
+    target = frame.get_column(TARGET_COLUMN).cast(pl.Float64)
+    return feature_frame.to_numpy(), target.to_numpy(), list(FEATURE_COLUMNS)
 
 
 def train_poisson_model(
     X_train: np.ndarray,
     y_train: np.ndarray,
-    X_valid: np.ndarray,
-    y_valid: np.ndarray,
+    X_valid: np.ndarray | None = None,
+    y_valid: np.ndarray | None = None,
+    *,
+    params: dict[str, Any] | None = None,
 ) -> xgb.XGBRegressor:
     """Train an XGBoost regressor with a Poisson objective."""
-    model = xgb.XGBRegressor(
-        objective="count:poisson",
-        n_estimators=500,
-        learning_rate=0.03,
-        max_depth=4,
-        min_child_weight=1.0,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        reg_alpha=0.0,
-        reg_lambda=1.0,
-        tree_method="hist",
-        eval_metric="poisson-nloglik",
-        random_state=42,
-    )
+    model_params = DEFAULT_XGB_PARAMS | (params or {})
+    model = xgb.XGBRegressor(**model_params)
 
+    fit_kwargs: dict[str, Any] = {"verbose": False}
+    if X_valid is not None and y_valid is not None:
+        fit_kwargs["eval_set"] = [(X_valid, y_valid)]
     model.fit(
         X_train,
         y_train,
-        eval_set=[(X_valid, y_valid)],
-        verbose=False,
+        **fit_kwargs,
     )
 
     return model
+
+
+def tune_poisson_hyperparameters(
+    frame: pl.DataFrame,
+    *,
+    n_trials: int = DEFAULT_OPTUNA_TRIALS,
+    validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
+    timeout_seconds: int | None = None,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Use Optuna on a temporal validation split without exposing 2026 World Cup rows."""
+    if n_trials <= 0:
+        raise ValueError("n_trials must be greater than zero.")
+
+    try:
+        import optuna
+    except ImportError as exc:  # pragma: no cover - covered by dependency metadata.
+        raise RuntimeError("Optuna is not installed. Run `uv sync` and try again.") from exc
+
+    X_train, X_valid, y_train, y_valid, _ = prepare_matrices(
+        frame,
+        validation_fraction=validation_fraction,
+    )
+
+    def objective(trial: optuna.Trial) -> float:
+        trial_params = {
+            "n_estimators": trial.suggest_int("n_estimators", 200, 1200),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
+            "max_depth": trial.suggest_int("max_depth", 2, 8),
+            "min_child_weight": trial.suggest_float("min_child_weight", 0.5, 10.0, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 20.0, log=True),
+            "gamma": trial.suggest_float("gamma", 1e-8, 5.0, log=True),
+        }
+        model = train_poisson_model(
+            X_train,
+            y_train,
+            X_valid,
+            y_valid,
+            params=trial_params,
+        )
+        y_pred = _positive_predictions(model.predict(X_valid))
+        return float(mean_poisson_deviance(y_valid, y_pred))
+
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=seed),
+    )
+    study.optimize(objective, n_trials=n_trials, timeout=timeout_seconds)
+    LOGGER.info(
+        "Best Optuna trial - Poisson deviance: %.4f | params: %s",
+        study.best_value,
+        study.best_params,
+    )
+    return dict(study.best_params)
 
 
 def explain_model(
@@ -175,15 +300,35 @@ def evaluate_model(
     y_valid: np.ndarray,
 ) -> dict[str, float]:
     """Compute validation metrics for the Poisson regressor."""
-    y_pred = model.predict(X_valid)
+    y_pred = _positive_predictions(model.predict(X_valid))
     return {
-        "mae": mean_absolute_error(y_valid, y_pred),
-        "poisson_deviance": mean_poisson_deviance(y_valid, y_pred),
-        "r2": r2_score(y_valid, y_pred),
+        "mae": float(mean_absolute_error(y_valid, y_pred)),
+        "poisson_deviance": float(mean_poisson_deviance(y_valid, y_pred)),
+        "r2": float(r2_score(y_valid, y_pred)),
     }
 
 
-def train_pipeline(db_path: Path | None = None) -> ModelArtifacts:
+def _positive_predictions(predictions: np.ndarray) -> np.ndarray:
+    """Keep Poisson metrics well-defined if a booster returns numerical underflow."""
+    return np.clip(predictions, 1e-12, None)
+
+
+def save_json_artifact(payload: dict[str, Any], output_path: Path) -> Path:
+    """Persist a JSON artifact under the models directory."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return output_path
+
+
+def train_pipeline(
+    db_path: Path | None = None,
+    *,
+    tune: bool = False,
+    optuna_trials: int = DEFAULT_OPTUNA_TRIALS,
+    optuna_timeout_seconds: int | None = None,
+    validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
+    evaluate_current_world_cup: bool = True,
+) -> ModelArtifacts:
     """Run the end-to-end training and interpretation pipeline."""
     logging.basicConfig(
         level=logging.INFO,
@@ -193,10 +338,31 @@ def train_pipeline(db_path: Path | None = None) -> ModelArtifacts:
     frame = load_training_frame(db_path)
     LOGGER.info("Loaded training frame with shape %s", frame.shape)
 
-    X_train, X_valid, y_train, y_valid, feature_names = prepare_matrices(frame)
-    model = train_poisson_model(X_train, y_train, X_valid, y_valid)
+    best_params: dict[str, Any] = {}
+    best_params_path = None
+    if tune:
+        best_params = tune_poisson_hyperparameters(
+            frame,
+            n_trials=optuna_trials,
+            timeout_seconds=optuna_timeout_seconds,
+            validation_fraction=validation_fraction,
+        )
+        best_params_path = save_json_artifact(best_params, BEST_PARAMS_PATH)
+        LOGGER.info("Best Optuna params saved to %s", best_params_path)
 
-    metrics = evaluate_model(model, X_valid, y_valid)
+    X_train, X_valid, y_train, y_valid, feature_names = prepare_matrices(
+        frame,
+        validation_fraction=validation_fraction,
+    )
+    validation_model = train_poisson_model(
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
+        params=best_params,
+    )
+
+    metrics = evaluate_model(validation_model, X_valid, y_valid)
     LOGGER.info(
         "Validation metrics - MAE: %.4f | Poisson deviance: %.4f | R2: %.4f",
         metrics["mae"],
@@ -204,17 +370,85 @@ def train_pipeline(db_path: Path | None = None) -> ModelArtifacts:
         metrics["r2"],
     )
 
+    X_full, y_full, _ = prepare_full_training_matrix(frame)
+    model = train_poisson_model(X_full, y_full, params=best_params)
     model_path = save_model(model)
     beeswarm_path = explain_model(model, X_valid, feature_names)
+    holdout_metrics_path = None
+    if evaluate_current_world_cup:
+        holdout_metrics_path = evaluate_current_world_cup_holdout(model, db_path)
     LOGGER.info("Model saved to %s", model_path)
     LOGGER.info("Beeswarm saved to %s", beeswarm_path)
 
-    return ModelArtifacts(model_path=model_path, beeswarm_path=beeswarm_path)
+    return ModelArtifacts(
+        model_path=model_path,
+        beeswarm_path=beeswarm_path,
+        best_params_path=best_params_path,
+        holdout_metrics_path=holdout_metrics_path,
+    )
+
+
+def evaluate_current_world_cup_holdout(
+    model: xgb.XGBRegressor,
+    db_path: Path | None = None,
+) -> Path | None:
+    """Evaluate scored 2026 World Cup rows once, after tuning/training is complete."""
+    holdout_frame = load_current_world_cup_holdout_frame(db_path)
+    if holdout_frame.height == 0:
+        LOGGER.info("No scored 2026 World Cup holdout rows found; skipping final holdout metrics.")
+        return None
+
+    X_holdout, y_holdout, _ = prepare_full_training_matrix(holdout_frame)
+    metrics = evaluate_model(model, X_holdout, y_holdout)
+    payload = {"rows": holdout_frame.height, **metrics}
+    metrics_path = save_json_artifact(payload, WORLD_CUP_2026_HOLDOUT_METRICS_PATH)
+    LOGGER.info(
+        "World Cup 2026 holdout metrics - rows: %d | MAE: %.4f | Poisson deviance: %.4f | R2: %.4f",
+        holdout_frame.height,
+        metrics["mae"],
+        metrics["poisson_deviance"],
+        metrics["r2"],
+    )
+    return metrics_path
 
 
 def main() -> int:
     """CLI entrypoint."""
-    train_pipeline()
+    parser = argparse.ArgumentParser(description="Train the Poisson XGBoost model.")
+    parser.add_argument("--db-path", type=Path, default=None, help="DuckDB warehouse path.")
+    parser.add_argument("--tune", action="store_true", help="Tune XGBoost params with Optuna.")
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=DEFAULT_OPTUNA_TRIALS,
+        help="Number of Optuna trials when --tune is enabled.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=None,
+        help="Optional Optuna tuning timeout in seconds.",
+    )
+    parser.add_argument(
+        "--validation-fraction",
+        type=float,
+        default=DEFAULT_VALIDATION_FRACTION,
+        help="Most recent historical fraction used for temporal validation.",
+    )
+    parser.add_argument(
+        "--skip-current-world-cup-eval",
+        action="store_true",
+        help="Skip final scored World Cup 2026 holdout evaluation.",
+    )
+    args = parser.parse_args()
+    train_pipeline(
+        args.db_path,
+        tune=args.tune,
+        optuna_trials=args.trials,
+        optuna_timeout_seconds=args.timeout_seconds,
+        validation_fraction=args.validation_fraction,
+        evaluate_current_world_cup=not args.skip_current_world_cup_eval,
+    )
     return 0
 
 
