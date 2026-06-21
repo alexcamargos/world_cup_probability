@@ -105,6 +105,8 @@ def _load_consolidated_matches(
     has_world_football_elo_ratings = _world_football_elo_ratings_tables_available(con)
     has_fifa_world_ranking = _fifa_world_ranking_tables_available(con)
     has_squad_attributes = _squad_attributes_table_available(con)
+    has_world_cup_prior_history = _world_cup_prior_history_table_available(con)
+    has_world_cup_prior_discipline = _world_cup_prior_discipline_table_available(con)
     home_team_key = "regexp_replace(lower(m.home_team_id), '[^a-z0-9]+', '', 'g')"
     away_team_key = "regexp_replace(lower(m.away_team_id), '[^a-z0-9]+', '', 'g')"
     squad_attributes_ctes = (
@@ -228,6 +230,114 @@ def _load_consolidated_matches(
     away_fifa_rank_expr = (
         "COALESCE(CAST(afr.fifa_rank AS DOUBLE), 0.0)" if has_fifa_world_ranking else "0.0"
     )
+    home_prior_world_cup_appearances_expr = (
+        "COALESCE(CAST(hwch.prior_world_cup_appearances AS DOUBLE), 0.0)"
+        if has_world_cup_prior_history
+        else "0.0"
+    )
+    away_prior_world_cup_appearances_expr = (
+        "COALESCE(CAST(awch.prior_world_cup_appearances AS DOUBLE), 0.0)"
+        if has_world_cup_prior_history
+        else "0.0"
+    )
+    home_prior_world_cup_points_per_match_expr = (
+        "COALESCE(hwch.prior_world_cup_points_per_match, 0.0)"
+        if has_world_cup_prior_history
+        else "0.0"
+    )
+    away_prior_world_cup_points_per_match_expr = (
+        "COALESCE(awch.prior_world_cup_points_per_match, 0.0)"
+        if has_world_cup_prior_history
+        else "0.0"
+    )
+    home_prior_world_cup_goal_diff_per_match_expr = (
+        "COALESCE(hwch.prior_world_cup_goal_diff_per_match, 0.0)"
+        if has_world_cup_prior_history
+        else "0.0"
+    )
+    away_prior_world_cup_goal_diff_per_match_expr = (
+        "COALESCE(awch.prior_world_cup_goal_diff_per_match, 0.0)"
+        if has_world_cup_prior_history
+        else "0.0"
+    )
+    world_cup_prior_history_joins = (
+        f"""
+        LEFT JOIN d_world_cup_prior_team_history AS hwch
+            ON hwch.as_of_year = CAST(EXTRACT(year FROM m.match_date) AS INTEGER)
+            AND (
+                lower(hwch.team_name) = lower(m.home_team_id)
+                OR hwch.normalized_team_name = {home_team_key}
+                OR lower(hwch.team_code) = lower(m.home_team_id)
+                OR regexp_replace(lower(COALESCE(hwch.team_code, '')), '[^a-z0-9]+', '', 'g')
+                    = {home_team_key}
+            )
+        LEFT JOIN d_world_cup_prior_team_history AS awch
+            ON awch.as_of_year = CAST(EXTRACT(year FROM m.match_date) AS INTEGER)
+            AND (
+                lower(awch.team_name) = lower(m.away_team_id)
+                OR awch.normalized_team_name = {away_team_key}
+                OR lower(awch.team_code) = lower(m.away_team_id)
+                OR regexp_replace(lower(COALESCE(awch.team_code, '')), '[^a-z0-9]+', '', 'g')
+                    = {away_team_key}
+            )
+        """
+        if has_world_cup_prior_history
+        else ""
+    )
+    home_prior_world_cup_yellow_cards_per_match_expr = (
+        "COALESCE(hwdh.prior_world_cup_yellow_cards_per_match, 0.0)"
+        if has_world_cup_prior_discipline
+        else "0.0"
+    )
+    away_prior_world_cup_yellow_cards_per_match_expr = (
+        "COALESCE(awdh.prior_world_cup_yellow_cards_per_match, 0.0)"
+        if has_world_cup_prior_discipline
+        else "0.0"
+    )
+    home_prior_world_cup_sending_offs_per_match_expr = (
+        "COALESCE(hwdh.prior_world_cup_sending_offs_per_match, 0.0)"
+        if has_world_cup_prior_discipline
+        else "0.0"
+    )
+    away_prior_world_cup_sending_offs_per_match_expr = (
+        "COALESCE(awdh.prior_world_cup_sending_offs_per_match, 0.0)"
+        if has_world_cup_prior_discipline
+        else "0.0"
+    )
+    home_prior_world_cup_fair_play_penalty_per_match_expr = (
+        "COALESCE(hwdh.prior_world_cup_fair_play_penalty_per_match, 0.0)"
+        if has_world_cup_prior_discipline
+        else "0.0"
+    )
+    away_prior_world_cup_fair_play_penalty_per_match_expr = (
+        "COALESCE(awdh.prior_world_cup_fair_play_penalty_per_match, 0.0)"
+        if has_world_cup_prior_discipline
+        else "0.0"
+    )
+    world_cup_prior_discipline_joins = (
+        f"""
+        LEFT JOIN d_world_cup_prior_discipline_history AS hwdh
+            ON hwdh.as_of_year = CAST(EXTRACT(year FROM m.match_date) AS INTEGER)
+            AND (
+                lower(hwdh.team_name) = lower(m.home_team_id)
+                OR hwdh.normalized_team_name = {home_team_key}
+                OR lower(hwdh.team_code) = lower(m.home_team_id)
+                OR regexp_replace(lower(COALESCE(hwdh.team_code, '')), '[^a-z0-9]+', '', 'g')
+                    = {home_team_key}
+            )
+        LEFT JOIN d_world_cup_prior_discipline_history AS awdh
+            ON awdh.as_of_year = CAST(EXTRACT(year FROM m.match_date) AS INTEGER)
+            AND (
+                lower(awdh.team_name) = lower(m.away_team_id)
+                OR awdh.normalized_team_name = {away_team_key}
+                OR lower(awdh.team_code) = lower(m.away_team_id)
+                OR regexp_replace(lower(COALESCE(awdh.team_code, '')), '[^a-z0-9]+', '', 'g')
+                    = {away_team_key}
+            )
+        """
+        if has_world_cup_prior_discipline
+        else ""
+    )
     current_world_cup_exclusion = current_world_cup_exclusion_sql(
         date_expr="m.match_date",
         competition_expr="m.competition",
@@ -260,10 +370,40 @@ def _load_consolidated_matches(
         away_fifa_points_expr=away_fifa_points_expr,
         home_fifa_rank_expr=home_fifa_rank_expr,
         away_fifa_rank_expr=away_fifa_rank_expr,
+        home_prior_world_cup_appearances_expr=home_prior_world_cup_appearances_expr,
+        away_prior_world_cup_appearances_expr=away_prior_world_cup_appearances_expr,
+        home_prior_world_cup_points_per_match_expr=home_prior_world_cup_points_per_match_expr,
+        away_prior_world_cup_points_per_match_expr=away_prior_world_cup_points_per_match_expr,
+        home_prior_world_cup_goal_diff_per_match_expr=(
+            home_prior_world_cup_goal_diff_per_match_expr
+        ),
+        away_prior_world_cup_goal_diff_per_match_expr=(
+            away_prior_world_cup_goal_diff_per_match_expr
+        ),
+        home_prior_world_cup_yellow_cards_per_match_expr=(
+            home_prior_world_cup_yellow_cards_per_match_expr
+        ),
+        away_prior_world_cup_yellow_cards_per_match_expr=(
+            away_prior_world_cup_yellow_cards_per_match_expr
+        ),
+        home_prior_world_cup_sending_offs_per_match_expr=(
+            home_prior_world_cup_sending_offs_per_match_expr
+        ),
+        away_prior_world_cup_sending_offs_per_match_expr=(
+            away_prior_world_cup_sending_offs_per_match_expr
+        ),
+        home_prior_world_cup_fair_play_penalty_per_match_expr=(
+            home_prior_world_cup_fair_play_penalty_per_match_expr
+        ),
+        away_prior_world_cup_fair_play_penalty_per_match_expr=(
+            away_prior_world_cup_fair_play_penalty_per_match_expr
+        ),
         home_squad_attribute_selects=home_squad_attribute_selects,
         away_squad_attribute_selects=away_squad_attribute_selects,
         world_football_elo_ratings_joins=world_football_elo_ratings_joins,
         fifa_world_ranking_joins=fifa_world_ranking_joins,
+        world_cup_prior_history_joins=world_cup_prior_history_joins,
+        world_cup_prior_discipline_joins=world_cup_prior_discipline_joins,
         squad_attribute_joins=squad_attribute_joins,
         current_world_cup_flag=current_world_cup_flag,
         current_world_cup_exclusion=training_scope_filter,
@@ -317,12 +457,41 @@ def _squad_attributes_table_available(con: duckdb.DuckDBPyConnection) -> bool:
     )
 
 
+def _world_cup_prior_history_table_available(con: duckdb.DuckDBPyConnection) -> bool:
+    return (
+        con.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_name = 'd_world_cup_prior_team_history'
+            """,
+        ).fetchone()[0]
+        > 0
+    )
+
+
+def _world_cup_prior_discipline_table_available(con: duckdb.DuckDBPyConnection) -> bool:
+    return (
+        con.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'main'
+              AND table_name = 'd_world_cup_prior_discipline_history'
+            """,
+        ).fetchone()[0]
+        > 0
+    )
+
+
 def _build_team_level_features(
     match_df: pl.DataFrame,
     *,
     include_metadata: bool = False,
 ) -> pl.DataFrame:
     """Derive recent-form features and collapse the dataset back to match level."""
+    match_df = _ensure_prior_world_cup_columns(match_df)
+    match_df = _ensure_prior_world_cup_discipline_columns(match_df)
     home_team = _build_side_frame(match_df, side="home")
     away_team = _build_side_frame(match_df, side="away")
 
@@ -351,6 +520,30 @@ def _build_team_level_features(
         (
             pl.col("team_fifa_world_ranking_rank_away") - pl.col("team_fifa_world_ranking_rank")
         ).alias("fifa_world_ranking_rank_diff"),
+        (
+            pl.col("team_prior_world_cup_appearances")
+            - pl.col("team_prior_world_cup_appearances_away")
+        ).alias("prior_world_cup_appearances_diff"),
+        (
+            pl.col("team_prior_world_cup_points_per_match")
+            - pl.col("team_prior_world_cup_points_per_match_away")
+        ).alias("prior_world_cup_points_per_match_diff"),
+        (
+            pl.col("team_prior_world_cup_goal_diff_per_match")
+            - pl.col("team_prior_world_cup_goal_diff_per_match_away")
+        ).alias("prior_world_cup_goal_diff_per_match_diff"),
+        (
+            pl.col("team_prior_world_cup_yellow_cards_per_match")
+            - pl.col("team_prior_world_cup_yellow_cards_per_match_away")
+        ).alias("prior_world_cup_yellow_cards_per_match_diff"),
+        (
+            pl.col("team_prior_world_cup_sending_offs_per_match")
+            - pl.col("team_prior_world_cup_sending_offs_per_match_away")
+        ).alias("prior_world_cup_sending_offs_per_match_diff"),
+        (
+            pl.col("team_prior_world_cup_fair_play_penalty_per_match")
+            - pl.col("team_prior_world_cup_fair_play_penalty_per_match_away")
+        ).alias("prior_world_cup_fair_play_penalty_per_match_diff"),
         (pl.col("team_market_value_eur") - pl.col("team_market_value_eur_away")).alias(
             "market_value_diff"
         ),
@@ -375,6 +568,38 @@ def _build_team_level_features(
     feature_df = matched.select(feature_columns)
 
     return feature_df
+
+
+def _ensure_prior_world_cup_columns(match_df: pl.DataFrame) -> pl.DataFrame:
+    """Backfill optional Fjelstul feature columns for direct unit-test frames."""
+    required_columns = (
+        "home_prior_world_cup_appearances",
+        "away_prior_world_cup_appearances",
+        "home_prior_world_cup_points_per_match",
+        "away_prior_world_cup_points_per_match",
+        "home_prior_world_cup_goal_diff_per_match",
+        "away_prior_world_cup_goal_diff_per_match",
+    )
+    missing_columns = [column for column in required_columns if column not in match_df.columns]
+    if not missing_columns:
+        return match_df
+    return match_df.with_columns(pl.lit(0.0).alias(column) for column in missing_columns)
+
+
+def _ensure_prior_world_cup_discipline_columns(match_df: pl.DataFrame) -> pl.DataFrame:
+    """Backfill optional Fjelstul discipline feature columns for direct unit-test frames."""
+    required_columns = (
+        "home_prior_world_cup_yellow_cards_per_match",
+        "away_prior_world_cup_yellow_cards_per_match",
+        "home_prior_world_cup_sending_offs_per_match",
+        "away_prior_world_cup_sending_offs_per_match",
+        "home_prior_world_cup_fair_play_penalty_per_match",
+        "away_prior_world_cup_fair_play_penalty_per_match",
+    )
+    missing_columns = [column for column in required_columns if column not in match_df.columns]
+    if not missing_columns:
+        return match_df
+    return match_df.with_columns(pl.lit(0.0).alias(column) for column in missing_columns)
 
 
 def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
@@ -408,6 +633,42 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
                 ),
                 pl.col("home_fifa_world_ranking_rank").alias("team_fifa_world_ranking_rank"),
                 pl.col("away_fifa_world_ranking_rank").alias("opponent_fifa_world_ranking_rank"),
+                pl.col("home_prior_world_cup_appearances").alias(
+                    "team_prior_world_cup_appearances"
+                ),
+                pl.col("away_prior_world_cup_appearances").alias(
+                    "opponent_prior_world_cup_appearances"
+                ),
+                pl.col("home_prior_world_cup_points_per_match").alias(
+                    "team_prior_world_cup_points_per_match"
+                ),
+                pl.col("away_prior_world_cup_points_per_match").alias(
+                    "opponent_prior_world_cup_points_per_match"
+                ),
+                pl.col("home_prior_world_cup_goal_diff_per_match").alias(
+                    "team_prior_world_cup_goal_diff_per_match"
+                ),
+                pl.col("away_prior_world_cup_goal_diff_per_match").alias(
+                    "opponent_prior_world_cup_goal_diff_per_match"
+                ),
+                pl.col("home_prior_world_cup_yellow_cards_per_match").alias(
+                    "team_prior_world_cup_yellow_cards_per_match"
+                ),
+                pl.col("away_prior_world_cup_yellow_cards_per_match").alias(
+                    "opponent_prior_world_cup_yellow_cards_per_match"
+                ),
+                pl.col("home_prior_world_cup_sending_offs_per_match").alias(
+                    "team_prior_world_cup_sending_offs_per_match"
+                ),
+                pl.col("away_prior_world_cup_sending_offs_per_match").alias(
+                    "opponent_prior_world_cup_sending_offs_per_match"
+                ),
+                pl.col("home_prior_world_cup_fair_play_penalty_per_match").alias(
+                    "team_prior_world_cup_fair_play_penalty_per_match"
+                ),
+                pl.col("away_prior_world_cup_fair_play_penalty_per_match").alias(
+                    "opponent_prior_world_cup_fair_play_penalty_per_match"
+                ),
                 pl.col("home_market_value_eur").alias("team_market_value_eur"),
                 pl.col("away_market_value_eur").alias("opponent_market_value_eur"),
                 pl.col("home_avg_overall").alias("team_avg_overall"),
@@ -445,6 +706,42 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
             pl.col("home_fifa_world_ranking_points").alias("opponent_fifa_world_ranking_points"),
             pl.col("away_fifa_world_ranking_rank").alias("team_fifa_world_ranking_rank"),
             pl.col("home_fifa_world_ranking_rank").alias("opponent_fifa_world_ranking_rank"),
+            pl.col("away_prior_world_cup_appearances").alias(
+                "team_prior_world_cup_appearances"
+            ),
+            pl.col("home_prior_world_cup_appearances").alias(
+                "opponent_prior_world_cup_appearances"
+            ),
+            pl.col("away_prior_world_cup_points_per_match").alias(
+                "team_prior_world_cup_points_per_match"
+            ),
+            pl.col("home_prior_world_cup_points_per_match").alias(
+                "opponent_prior_world_cup_points_per_match"
+            ),
+            pl.col("away_prior_world_cup_goal_diff_per_match").alias(
+                "team_prior_world_cup_goal_diff_per_match"
+            ),
+            pl.col("home_prior_world_cup_goal_diff_per_match").alias(
+                "opponent_prior_world_cup_goal_diff_per_match"
+            ),
+            pl.col("away_prior_world_cup_yellow_cards_per_match").alias(
+                "team_prior_world_cup_yellow_cards_per_match"
+            ),
+            pl.col("home_prior_world_cup_yellow_cards_per_match").alias(
+                "opponent_prior_world_cup_yellow_cards_per_match"
+            ),
+            pl.col("away_prior_world_cup_sending_offs_per_match").alias(
+                "team_prior_world_cup_sending_offs_per_match"
+            ),
+            pl.col("home_prior_world_cup_sending_offs_per_match").alias(
+                "opponent_prior_world_cup_sending_offs_per_match"
+            ),
+            pl.col("away_prior_world_cup_fair_play_penalty_per_match").alias(
+                "team_prior_world_cup_fair_play_penalty_per_match"
+            ),
+            pl.col("home_prior_world_cup_fair_play_penalty_per_match").alias(
+                "opponent_prior_world_cup_fair_play_penalty_per_match"
+            ),
             pl.col("away_market_value_eur").alias("team_market_value_eur"),
             pl.col("home_market_value_eur").alias("opponent_market_value_eur"),
             pl.col("away_avg_overall").alias("team_avg_overall"),
@@ -481,6 +778,18 @@ def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("opponent_fifa_world_ranking_points"),
             pl.col("team_fifa_world_ranking_rank"),
             pl.col("opponent_fifa_world_ranking_rank"),
+            pl.col("team_prior_world_cup_appearances"),
+            pl.col("opponent_prior_world_cup_appearances"),
+            pl.col("team_prior_world_cup_points_per_match"),
+            pl.col("opponent_prior_world_cup_points_per_match"),
+            pl.col("team_prior_world_cup_goal_diff_per_match"),
+            pl.col("opponent_prior_world_cup_goal_diff_per_match"),
+            pl.col("team_prior_world_cup_yellow_cards_per_match"),
+            pl.col("opponent_prior_world_cup_yellow_cards_per_match"),
+            pl.col("team_prior_world_cup_sending_offs_per_match"),
+            pl.col("opponent_prior_world_cup_sending_offs_per_match"),
+            pl.col("team_prior_world_cup_fair_play_penalty_per_match"),
+            pl.col("opponent_prior_world_cup_fair_play_penalty_per_match"),
             pl.col("team_market_value_eur"),
             pl.col("opponent_market_value_eur"),
             pl.col("team_avg_overall"),
