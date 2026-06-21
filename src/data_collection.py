@@ -125,6 +125,14 @@ def download_kaggle_dataset(
     """
     _validate_kaggle_dataset_slug(dataset)
     destination.mkdir(parents=True, exist_ok=True)
+    if _has_existing_raw_files(destination) and not force:
+        LOGGER.info(
+            "Skipping Kaggle dataset '%s' because raw files already exist in %s",
+            dataset,
+            destination,
+        )
+        return destination
+
     kaggle_client = client if client is not None else _create_kaggle_client()
     kaggle_client.authenticate()
     try:
@@ -757,56 +765,92 @@ def run_downloads(args: argparse.Namespace) -> list[Path]:
 
     if "matches" in requested_sources:
         match_raw_dir = raw_dir / "kaggle" / _dataset_directory_name(MATCH_RESULTS_DATASET)
-        downloaded_paths.append(
-            download_kaggle_dataset(
-                MATCH_RESULTS_DATASET,
-                match_raw_dir,
-                force=args.force_download,
+        if _should_skip_existing_raw("matches", match_raw_dir, args.force_download):
+            downloaded_paths.append(match_raw_dir)
+        else:
+            downloaded_paths.append(
+                download_kaggle_dataset(
+                    MATCH_RESULTS_DATASET,
+                    match_raw_dir,
+                    force=args.force_download,
+                )
             )
-        )
 
     if "fbref" in requested_sources:
         if not args.fbref_leagues or not args.fbref_seasons:
             args.fbref_leagues, args.fbref_seasons = _resolve_fbref_defaults()
-        try:
-            downloaded_paths.extend(
-                fetch_fbref_with_soccerdata(
-                    leagues=args.fbref_leagues,
-                    seasons=args.fbref_seasons,
-                    raw_dir=raw_dir / "fbref",
-                    no_cache=args.fbref_no_cache,
+        fbref_raw_dir = raw_dir / "fbref"
+        if _should_skip_existing_raw("fbref", fbref_raw_dir, args.force_download):
+            downloaded_paths.append(fbref_raw_dir)
+        else:
+            try:
+                downloaded_paths.extend(
+                    fetch_fbref_with_soccerdata(
+                        leagues=args.fbref_leagues,
+                        seasons=args.fbref_seasons,
+                        raw_dir=fbref_raw_dir,
+                        no_cache=args.fbref_no_cache,
+                    )
                 )
-            )
-        except (
-            ConnectionError,
-            RuntimeError,
-            ValueError,
-            requests.exceptions.RequestException,
-        ) as exc:
-            if explicit_sources:
-                raise
-            LOGGER.warning(
-                "Skipping FBref download because the source is unavailable with the "
-                "default settings: %s",
-                exc,
-            )
+            except (
+                ConnectionError,
+                RuntimeError,
+                ValueError,
+                requests.exceptions.RequestException,
+            ) as exc:
+                if explicit_sources:
+                    raise
+                LOGGER.warning(
+                    "Skipping FBref download because the source is unavailable with the "
+                    "default settings: %s",
+                    exc,
+                )
 
     if "squad" in requested_sources:
         if not args.ea_fc_dataset:
             args.ea_fc_dataset = DEFAULT_EA_FC_DATASET
         squad_raw_dir = raw_dir / "kaggle" / _dataset_directory_name(args.ea_fc_dataset)
-        downloaded_paths.append(
-            download_kaggle_dataset(
-                args.ea_fc_dataset,
-                squad_raw_dir,
-                force=args.force_download,
+        if _should_skip_existing_raw("squad", squad_raw_dir, args.force_download):
+            downloaded_paths.append(squad_raw_dir)
+        else:
+            downloaded_paths.append(
+                download_kaggle_dataset(
+                    args.ea_fc_dataset,
+                    squad_raw_dir,
+                    force=args.force_download,
+                )
             )
-        )
 
     if "transfermarkt" in requested_sources:
-        if args.transfermarkt_manifest is None:
+        transfermarkt_raw_dir = raw_dir / "transfermarkt"
+        if _should_skip_existing_raw("transfermarkt", transfermarkt_raw_dir, args.force_download):
+            downloaded_paths.append(_resolve_transfermarkt_raw(raw_dir, None))
+        elif args.transfermarkt_manifest is None:
             args.transfermarkt_manifest = DEFAULT_TRANSFERMARKT_MANIFEST
-        if not Path(args.transfermarkt_manifest).exists():
+            if not Path(args.transfermarkt_manifest).exists():
+                if explicit_sources:
+                    raise FileNotFoundError(
+                        f"Transfermarkt manifest not found: {args.transfermarkt_manifest}"
+                    )
+                LOGGER.warning(
+                    "Skipping Transfermarkt download because the default manifest does "
+                    "not exist: %s",
+                    args.transfermarkt_manifest,
+                )
+                requested_sources.remove("transfermarkt")
+            else:
+                values = scrape_transfermarkt_market_values(
+                    read_transfermarkt_manifest(Path(args.transfermarkt_manifest))
+                )
+                downloaded_paths.append(
+                    write_transfermarkt_raw(
+                        values,
+                        raw_dir
+                        / "transfermarkt"
+                        / f"market_values_{datetime.now(UTC):%Y%m%dT%H%M%SZ}.jsonl",
+                    )
+                )
+        elif not Path(args.transfermarkt_manifest).exists():
             if explicit_sources:
                 raise FileNotFoundError(
                     f"Transfermarkt manifest not found: {args.transfermarkt_manifest}"
@@ -830,7 +874,7 @@ def run_downloads(args: argparse.Namespace) -> list[Path]:
             )
 
     for path in downloaded_paths:
-        LOGGER.info("Downloaded raw data to %s", path)
+        LOGGER.info("Raw data available at %s", path)
     return downloaded_paths
 
 
@@ -957,7 +1001,9 @@ def run_collection(args: argparse.Namespace) -> list[LoadResult]:
 
     if "matches" in requested_sources:
         match_raw_dir = raw_dir / "kaggle" / _dataset_directory_name(MATCH_RESULTS_DATASET)
-        if not args.load_existing:
+        if not args.load_existing and not _should_skip_existing_raw(
+            "matches", match_raw_dir, args.force_download
+        ):
             download_kaggle_dataset(MATCH_RESULTS_DATASET, match_raw_dir, force=args.force_download)
         results.append(
             _run_load_step(
@@ -974,7 +1020,12 @@ def run_collection(args: argparse.Namespace) -> list[LoadResult]:
 
     if "fbref" in requested_sources:
         fbref_raw_dir = raw_dir / "fbref"
-        if args.fbref_leagues and args.fbref_seasons and not args.load_existing:
+        if (
+            args.fbref_leagues
+            and args.fbref_seasons
+            and not args.load_existing
+            and not _should_skip_existing_raw("fbref", fbref_raw_dir, args.force_download)
+        ):
             fetch_fbref_with_soccerdata(
                 leagues=args.fbref_leagues,
                 seasons=args.fbref_seasons,
@@ -998,7 +1049,9 @@ def run_collection(args: argparse.Namespace) -> list[LoadResult]:
         if not args.ea_fc_dataset:
             args.ea_fc_dataset = DEFAULT_EA_FC_DATASET
         squad_raw_dir = raw_dir / "kaggle" / _dataset_directory_name(args.ea_fc_dataset)
-        if not args.load_existing:
+        if not args.load_existing and not _should_skip_existing_raw(
+            "squad", squad_raw_dir, args.force_download
+        ):
             download_kaggle_dataset(args.ea_fc_dataset, squad_raw_dir, force=args.force_download)
         results.append(
             _run_load_step(
@@ -1015,16 +1068,26 @@ def run_collection(args: argparse.Namespace) -> list[LoadResult]:
         )
 
     if "transfermarkt" in requested_sources:
-        if args.transfermarkt_manifest is None:
+        transfermarkt_raw_dir = raw_dir / "transfermarkt"
+        use_existing_transfermarkt = args.load_existing or _should_skip_existing_raw(
+            "transfermarkt", transfermarkt_raw_dir, args.force_download
+        )
+        if args.transfermarkt_manifest is None and not use_existing_transfermarkt:
             raise ValueError(
                 "--transfermarkt-manifest is required when source 'transfermarkt' is selected."
             )
-        manifest_path = Path(args.transfermarkt_manifest)
-        values = scrape_transfermarkt_market_values(read_transfermarkt_manifest(manifest_path))
-        raw_path = write_transfermarkt_raw(
-            values,
-            raw_dir / "transfermarkt" / f"market_values_{datetime.now(UTC):%Y%m%dT%H%M%SZ}.jsonl",
-        )
+        if not use_existing_transfermarkt:
+            manifest_path = Path(args.transfermarkt_manifest)
+            values = scrape_transfermarkt_market_values(read_transfermarkt_manifest(manifest_path))
+            raw_path = write_transfermarkt_raw(
+                values,
+                raw_dir
+                / "transfermarkt"
+                / f"market_values_{datetime.now(UTC):%Y%m%dT%H%M%SZ}.jsonl",
+            )
+        else:
+            raw_path = _resolve_transfermarkt_raw(raw_dir, None)
+            values = read_transfermarkt_raw(raw_path)
         results.append(
             _run_load_step(
                 "transfermarkt_market_values",
@@ -1481,7 +1544,11 @@ def _resolve_transfermarkt_raw(raw_dir: Path, transfermarkt_raw: Path | None) ->
 
     transfermarkt_dir = raw_dir / "transfermarkt"
     candidates = sorted(
-        (path for path in transfermarkt_dir.glob("market_values_*.jsonl") if path.is_file()),
+        (
+            path
+            for path in transfermarkt_dir.glob("market_values_*.jsonl")
+            if _has_existing_file(path)
+        ),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -1489,8 +1556,54 @@ def _resolve_transfermarkt_raw(raw_dir: Path, transfermarkt_raw: Path | None) ->
         raise FileNotFoundError(
             "No Transfermarkt JSONL raw file found. Run download-data with "
             "--transfermarkt-manifest first."
-        )
+    )
     return candidates[0]
+
+
+def _should_skip_existing_raw(source_name: str, raw_path: Path, force_download: bool) -> bool:
+    if force_download:
+        return False
+
+    if not _source_raw_exists(source_name, raw_path):
+        return False
+
+    LOGGER.info(
+        "Skipping %s download because raw data already exists under %s",
+        source_name,
+        raw_path,
+    )
+    return True
+
+
+def _source_raw_exists(source_name: str, raw_path: Path) -> bool:
+    if source_name in {"matches", "squad"}:
+        return _has_existing_raw_files(raw_path)
+    if source_name == "fbref":
+        return all(
+            _has_existing_file(raw_path / filename)
+            for filename in ("fbref_schedule.parquet", "fbref_team_stats.parquet")
+        )
+    if source_name == "transfermarkt":
+        return any(
+            _has_existing_file(path)
+            for path in raw_path.glob("market_values_*.jsonl")
+            if path.is_file()
+        )
+    raise ValueError(f"Unsupported raw source: {source_name}")
+
+
+def _has_existing_raw_files(raw_path: Path) -> bool:
+    if not raw_path.exists():
+        return False
+    return any(
+        _has_existing_file(path)
+        for path in raw_path.rglob("*")
+        if path.is_file() and not path.name.startswith(".")
+    )
+
+
+def _has_existing_file(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
 
 
 def _validate_kaggle_dataset_slug(dataset: str) -> None:
