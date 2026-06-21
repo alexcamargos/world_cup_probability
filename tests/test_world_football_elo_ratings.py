@@ -135,6 +135,8 @@ def test_world_football_elo_ratings_supports_feature_training_frame(tmp_path: Pa
     assert frame.columns == [
         "world_cup_probability_elo_diff",
         "world_football_elo_ratings_diff",
+        "fifa_world_ranking_points_diff",
+        "fifa_world_ranking_rank_diff",
         "market_value_diff",
         "recent_form_diff",
         "target",
@@ -142,4 +144,6 @@ def test_world_football_elo_ratings_supports_feature_training_frame(tmp_path: Pa
     row = frame.row(0, named=True)
     assert row["world_cup_probability_elo_diff"] == pytest.approx(100.0)
     assert row["world_football_elo_ratings_diff"] == pytest.approx(-142.0)
+    assert row["fifa_world_ranking_points_diff"] == pytest.approx(100.0)
+    assert row["fifa_world_ranking_rank_diff"] == pytest.approx(0.0)
     assert row["target"] == 2
