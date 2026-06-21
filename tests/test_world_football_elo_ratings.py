@@ -138,6 +138,10 @@ def test_world_football_elo_ratings_supports_feature_training_frame(tmp_path: Pa
         "fifa_world_ranking_points_diff",
         "fifa_world_ranking_rank_diff",
         "market_value_diff",
+        "avg_overall_diff",
+        "avg_pace_diff",
+        "avg_stamina_diff",
+        "squad_depth_proxy",
         "recent_form_diff",
         "target",
     ]
@@ -146,4 +150,110 @@ def test_world_football_elo_ratings_supports_feature_training_frame(tmp_path: Pa
     assert row["world_football_elo_ratings_diff"] == pytest.approx(-142.0)
     assert row["fifa_world_ranking_points_diff"] == pytest.approx(100.0)
     assert row["fifa_world_ranking_rank_diff"] == pytest.approx(0.0)
+    assert row["avg_overall_diff"] == pytest.approx(0.0)
+    assert row["avg_pace_diff"] == pytest.approx(0.0)
+    assert row["avg_stamina_diff"] == pytest.approx(0.0)
+    assert row["squad_depth_proxy"] == pytest.approx(0.0)
     assert row["target"] == 2
+
+
+def test_squad_attributes_support_feature_training_frame(tmp_path: Path) -> None:
+    db_path = tmp_path / "warehouse" / "world_cup.duckdb"
+    initialize_database(db_path=db_path, load_raw_files=False)
+    initialize_elo_history(db_path=db_path)
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute(
+            """
+            INSERT INTO d_teams (team_id, team_name, loaded_at)
+            VALUES
+                ('Brazil', 'Brazil', current_timestamp),
+                ('Argentina', 'Argentina', current_timestamp)
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO d_squad_attributes (
+                team_id,
+                source_season,
+                avg_overall,
+                avg_pace,
+                avg_stamina,
+                sampled_player_count,
+                source_dataset,
+                source_file,
+                loaded_at
+            ) VALUES
+                (
+                    'Brazil', '2025-2026', 86.0, 84.0, 82.0, 11,
+                    'test', 'test.csv', current_timestamp
+                ),
+                (
+                    'Argentina', '2025-2026', 84.0, 80.0, 79.0, 9,
+                    'test', 'test.csv', current_timestamp
+                )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO f_matches (
+                match_id,
+                match_date,
+                competition,
+                home_team_id,
+                away_team_id,
+                home_team_score,
+                away_team_score,
+                neutral_site
+            ) VALUES ('m1', DATE '2026-06-20', 'Friendly', 'Brazil', 'Argentina', 2, 1, TRUE)
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO f_elo_history (
+                match_id,
+                match_date,
+                home_team_id,
+                away_team_id,
+                home_rating_before,
+                away_rating_before,
+                home_rating_after,
+                away_rating_after,
+                home_expected_score,
+                away_expected_score,
+                home_actual_score,
+                away_actual_score,
+                k_factor,
+                competition_weight,
+                home_advantage_points,
+                neutral_site,
+                updated_at
+            ) VALUES (
+                'm1',
+                DATE '2026-06-20',
+                'Brazil',
+                'Argentina',
+                1600.0,
+                1500.0,
+                1610.0,
+                1490.0,
+                0.5,
+                0.5,
+                1.0,
+                0.0,
+                20.0,
+                1.0,
+                0.0,
+                TRUE,
+                current_timestamp
+            )
+            """
+        )
+
+    frame = build_feature_frame(db_path)
+    row = frame.row(0, named=True)
+
+    assert row["avg_overall_diff"] == pytest.approx(2.0)
+    assert row["avg_pace_diff"] == pytest.approx(4.0)
+    assert row["avg_stamina_diff"] == pytest.approx(3.0)
+    assert row["squad_depth_proxy"] == pytest.approx(2.0)
