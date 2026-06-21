@@ -176,6 +176,36 @@ DDL_STATEMENTS: tuple[str, ...] = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS d_world_cup_prior_team_history (
+        team_id VARCHAR NOT NULL,
+        team_name VARCHAR NOT NULL,
+        team_code VARCHAR,
+        normalized_team_name VARCHAR NOT NULL,
+        as_of_year INTEGER NOT NULL,
+        prior_world_cup_appearances INTEGER NOT NULL,
+        prior_world_cup_points_per_match DOUBLE NOT NULL,
+        prior_world_cup_goal_diff_per_match DOUBLE NOT NULL,
+        source_file VARCHAR,
+        loaded_at TIMESTAMP,
+        PRIMARY KEY (team_id, as_of_year)
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS d_world_cup_prior_discipline_history (
+        team_id VARCHAR NOT NULL,
+        team_name VARCHAR NOT NULL,
+        team_code VARCHAR,
+        normalized_team_name VARCHAR NOT NULL,
+        as_of_year INTEGER NOT NULL,
+        prior_world_cup_yellow_cards_per_match DOUBLE NOT NULL,
+        prior_world_cup_sending_offs_per_match DOUBLE NOT NULL,
+        prior_world_cup_fair_play_penalty_per_match DOUBLE NOT NULL,
+        source_file VARCHAR,
+        loaded_at TIMESTAMP,
+        PRIMARY KEY (team_id, as_of_year)
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS data_collection_runs (
         run_id VARCHAR PRIMARY KEY,
         source_name VARCHAR NOT NULL,
