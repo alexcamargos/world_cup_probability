@@ -147,6 +147,8 @@ Manifesto Transfermarkt esperado:
 
 - Instale os hooks com `pre-commit install` e `pre-commit install --hook-type pre-push`
 - Os commits passam por `ruff format` e `ruff check --fix`
+- SQLs em `src/sql` podem ser validados com `uv run sqlfluff lint src/sql`
+- SQLs em `src/sql` podem ser formatados com `uv run sqlfluff fix src/sql`
 - O `pytest` roda no `pre-push`
 
 
