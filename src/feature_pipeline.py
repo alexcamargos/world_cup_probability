@@ -13,6 +13,11 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
+try:
+    from .competition_filters import current_world_cup_exclusion_sql
+except ImportError:  # pragma: no cover - supports direct script execution.
+    from competition_filters import current_world_cup_exclusion_sql
+
 LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -206,6 +211,10 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
     away_fifa_rank_expr = (
         "COALESCE(CAST(afr.fifa_rank AS DOUBLE), 0.0)" if has_fifa_world_ranking else "0.0"
     )
+    current_world_cup_exclusion = current_world_cup_exclusion_sql(
+        date_expr="m.match_date",
+        competition_expr="m.competition",
+    )
     fifa_world_ranking_joins = (
         f"""
         LEFT JOIN d_fifa_world_ranking_team_aliases AS hfa
@@ -261,6 +270,7 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
         WHERE m.match_date IS NOT NULL
           AND m.home_team_score IS NOT NULL
           AND m.away_team_score IS NOT NULL
+          AND {current_world_cup_exclusion}
         ORDER BY m.match_date ASC, m.match_id ASC
     """
     relation = con.sql(query)
