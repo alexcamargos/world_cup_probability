@@ -12,6 +12,7 @@ Ordem recomendada:
    - `uv run download-data --sources matches squad --ea-fc-dataset flynn28/eafc26-player-database`
    - `uv run download-data --sources fbref --fbref-leagues <league> --fbref-seasons <season>`
    - `uv run download-data --sources transfermarkt --transfermarkt-manifest data/raw/transfermarkt/teams.json`
+   - `uv run download-data --sources fjelstul`
    - Para baixar todas as fontes configuradas numa chamada:
      `uv run download-data --ea-fc-dataset flynn28/eafc26-player-database --fbref-leagues <league> --fbref-seasons <season> --transfermarkt-manifest data/raw/transfermarkt/teams.json`
 2. Carregar os dados brutos no warehouse DuckDB:
@@ -20,6 +21,7 @@ Ordem recomendada:
    - `uv run load-data --sources matches squad --ea-fc-dataset flynn28/eafc26-player-database`
    - `uv run load-data --sources fbref`
    - `uv run load-data --sources transfermarkt`
+   - `uv run load-data --sources fjelstul`
    - Para carregar todas as fontes já baixadas numa chamada:
      `uv run load-data --ea-fc-dataset flynn28/eafc26-player-database`
 3. Coletar e carregar em um único comando, quando for conveniente:
@@ -97,6 +99,25 @@ treino junto com `world_cup_probability_elo_diff` e
 `world_football_elo_ratings_diff`; se o snapshot ainda não estiver carregado,
 a geração de features usa o World Cup Probability Elo como fallback para pontos
 e rank neutro para manter o pipeline executável.
+
+A fonte `fjelstul` baixa `matches.csv` e `bookings.csv` do projeto
+[The Fjelstul World Cup Database](https://github.com/jfjelstul/worldcup) e
+materializa `d_world_cup_prior_team_history` e
+`d_world_cup_prior_discipline_history`. Essas tabelas criam, por seleção e ano,
+apenas estatísticas de Copas masculinas anteriores ao ano analisado:
+participações anteriores, pontos por jogo, saldo de gols por jogo, cartões
+amarelos por jogo, expulsões por jogo e penalidade histórica de fair play por
+jogo. As features `prior_world_cup_appearances_diff`,
+`prior_world_cup_points_per_match_diff`,
+`prior_world_cup_goal_diff_per_match_diff`,
+`prior_world_cup_yellow_cards_per_match_diff`,
+`prior_world_cup_sending_offs_per_match_diff` e
+`prior_world_cup_fair_play_penalty_per_match_diff` entram no treino como
+diferenças entre as seleções. Se as tabelas ainda não existirem, essas features
+usam zero como fallback para manter o pipeline executável. A taxa histórica de
+penalidade de fair play também alimenta o simulador de fase de grupos, que
+sorteia pontos positivos de penalidade por jogo para aplicar o critério de fair
+play antes do sorteio.
 
 O comando `simulate` carrega `models/xgb_poisson_model.json`, lê o warehouse
 `data/warehouse/world_cup.duckdb`, monta as intensidades de gols das 48
