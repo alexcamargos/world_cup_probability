@@ -1,14 +1,15 @@
-"""Monte Carlo simulator for the World Cup knockout bracket.
+"""Monte Carlo simulator for the FIFA World Cup 2026 tournament path.
 
-The simulator consumes Poisson goal lambdas produced by the XGBoost model,
-generates exact integer scores with ``numpy.random.poisson(lam)``, resolves
-ties with a simple penalty rule when a winner is required, and persists every
-simulated match to DuckDB in batches to keep memory usage bounded.
+The simulator uses the official 104-match schedule, plays the group stage,
+selects the top two teams from each group plus the eight best third-place teams,
+and resolves the published knockout slots through the final.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,10 +18,30 @@ from pathlib import Path
 import duckdb
 import numpy as np
 
+try:
+    from .world_cup_2026_schedule import (
+        TEAM_COUNTRIES,
+        TEAM_NAMES,
+        WorldCupFixture,
+        world_cup_2026_fixtures,
+    )
+except ImportError:  # pragma: no cover - supports direct script execution.
+    from world_cup_2026_schedule import (  # type: ignore[no-redef]
+        TEAM_COUNTRIES,
+        TEAM_NAMES,
+        WorldCupFixture,
+        world_cup_2026_fixtures,
+    )
+
 LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "warehouse" / "world_cup.duckdb"
+
+HOST_ADVANTAGE_MULTIPLIER = 1.10
+REST_DAY_EDGE_MULTIPLIER = 0.03
+MAX_REST_DAY_EDGE = 3.0
+EXPECTED_TEAM_COUNT = 48
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +51,7 @@ class TeamLambda:
     team_id: str
     team_name: str
     lambda_goals: float
+    country_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +60,12 @@ class SimulatedMatch:
 
     simulation_id: int
     round_name: str
+    group_name: str | None
     match_number: int
+    match_date: datetime
+    stadium: str
+    city: str
+    country: str
     home_team_id: str
     away_team_id: str
     home_team_name: str
@@ -51,7 +78,29 @@ class SimulatedMatch:
     decided_by_penalties: bool
     penalty_winner_team_id: str | None
     winner_team_id: str
+    runner_up_team_id: str
+    home_rest_days: float | None
+    away_rest_days: float | None
+    home_advantage: bool
+    away_advantage: bool
     created_at: datetime
+
+
+@dataclass(slots=True)
+class GroupStanding:
+    """Mutable group table row."""
+
+    team: TeamLambda
+    group_letter: str
+    played: int = 0
+    points: int = 0
+    goals_for: int = 0
+    goals_against: int = 0
+    wins: int = 0
+
+    @property
+    def goal_difference(self) -> int:
+        return self.goals_for - self.goals_against
 
 
 def initialize_simulated_results(db_path: Path = DB_PATH) -> None:
@@ -62,7 +111,12 @@ def initialize_simulated_results(db_path: Path = DB_PATH) -> None:
             CREATE TABLE IF NOT EXISTS simulated_results (
                 simulation_id INTEGER NOT NULL,
                 round_name VARCHAR NOT NULL,
+                group_name VARCHAR,
                 match_number INTEGER NOT NULL,
+                match_date TIMESTAMP,
+                stadium VARCHAR,
+                city VARCHAR,
+                country VARCHAR,
                 home_team_id VARCHAR NOT NULL,
                 away_team_id VARCHAR NOT NULL,
                 home_team_name VARCHAR,
@@ -75,10 +129,16 @@ def initialize_simulated_results(db_path: Path = DB_PATH) -> None:
                 decided_by_penalties BOOLEAN NOT NULL,
                 penalty_winner_team_id VARCHAR,
                 winner_team_id VARCHAR NOT NULL,
+                runner_up_team_id VARCHAR,
+                home_rest_days DOUBLE,
+                away_rest_days DOUBLE,
+                home_advantage BOOLEAN,
+                away_advantage BOOLEAN,
                 created_at TIMESTAMP NOT NULL
             );
             """,
         )
+        _migrate_simulated_results(con)
 
 
 def simulate_match(
@@ -87,32 +147,62 @@ def simulate_match(
     *,
     require_winner: bool,
     rng: np.random.Generator,
+    venue_country: str | None = None,
+    home_rest_days: float | None = None,
+    away_rest_days: float | None = None,
+    played_score: tuple[int, int] | None = None,
 ) -> SimulatedMatch:
     """Simulate a single match using Poisson scoring and optional penalties."""
-    home_lambda = max(float(home_team.lambda_goals), 0.0)
-    away_lambda = max(float(away_team.lambda_goals), 0.0)
+    home_advantage = _has_host_advantage(home_team, venue_country)
+    away_advantage = _has_host_advantage(away_team, venue_country)
+    home_lambda = _adjust_lambda(
+        home_team.lambda_goals,
+        has_host_advantage=home_advantage,
+        own_rest_days=home_rest_days,
+        opponent_rest_days=away_rest_days,
+    )
+    away_lambda = _adjust_lambda(
+        away_team.lambda_goals,
+        has_host_advantage=away_advantage,
+        own_rest_days=away_rest_days,
+        opponent_rest_days=home_rest_days,
+    )
 
-    home_goals = int(rng.poisson(home_lambda))
-    away_goals = int(rng.poisson(away_lambda))
+    if played_score is None:
+        home_goals = int(rng.poisson(home_lambda))
+        away_goals = int(rng.poisson(away_lambda))
+    else:
+        home_goals, away_goals = played_score
 
     decided_by_penalties = False
     penalty_winner_team_id: str | None = None
 
     if home_goals > away_goals:
         winner_team_id = home_team.team_id
+        runner_up_team_id = away_team.team_id
     elif away_goals > home_goals:
         winner_team_id = away_team.team_id
+        runner_up_team_id = home_team.team_id
     elif require_winner:
         decided_by_penalties = True
         penalty_winner_team_id = _resolve_penalties(home_team.team_id, away_team.team_id, rng)
         winner_team_id = penalty_winner_team_id
+        runner_up_team_id = (
+            away_team.team_id if winner_team_id == home_team.team_id else home_team.team_id
+        )
     else:
         winner_team_id = home_team.team_id
+        runner_up_team_id = away_team.team_id
 
     return SimulatedMatch(
         simulation_id=-1,
         round_name="",
+        group_name=None,
         match_number=-1,
+        match_date=datetime.now(UTC),
+        stadium="",
+        city="",
+        country=venue_country or "",
         home_team_id=home_team.team_id,
         away_team_id=away_team.team_id,
         home_team_name=home_team.team_name,
@@ -125,6 +215,11 @@ def simulate_match(
         decided_by_penalties=decided_by_penalties,
         penalty_winner_team_id=penalty_winner_team_id,
         winner_team_id=winner_team_id,
+        runner_up_team_id=runner_up_team_id,
+        home_rest_days=home_rest_days,
+        away_rest_days=away_rest_days,
+        home_advantage=home_advantage,
+        away_advantage=away_advantage,
         created_at=datetime.now(UTC),
     )
 
@@ -136,26 +231,21 @@ def simulate_world_cup(
     batch_size: int = 2_500,
     db_path: Path = DB_PATH,
     seed: int | None = None,
+    fixtures: Sequence[WorldCupFixture] | None = None,
 ) -> None:
-    """Run a Monte Carlo simulation for the knockout bracket.
-
-    Args:
-        teams: Ordered teams for the initial bracket.
-        iterations: Number of tournament runs to execute.
-        batch_size: How many simulated matches to persist per insert batch.
-        db_path: Local DuckDB warehouse path.
-        seed: Optional random seed for reproducibility.
-    """
+    """Run a Monte Carlo simulation for the FIFA World Cup 2026 schedule."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
-    if len(teams) < 2 or not _is_power_of_two(len(teams)):
-        raise ValueError("teams must contain a power-of-two number of entries.")
     if iterations <= 0:
         raise ValueError("iterations must be greater than zero.")
     if batch_size <= 0:
         raise ValueError("batch_size must be greater than zero.")
+
+    tournament_fixtures = tuple(fixtures or world_cup_2026_fixtures())
+    teams_by_code = _teams_by_code(teams)
+    _validate_schedule_coverage(teams_by_code, tournament_fixtures)
 
     initialize_simulated_results(db_path)
     rng = np.random.default_rng(seed)
@@ -165,7 +255,12 @@ def simulate_world_cup(
 
         buffer: list[tuple[object, ...]] = []
         for simulation_id in range(1, iterations + 1):
-            tournament_rows = _simulate_tournament(teams, simulation_id, rng)
+            tournament_rows = _simulate_tournament(
+                teams_by_code,
+                tournament_fixtures,
+                simulation_id,
+                rng,
+            )
             buffer.extend(tournament_rows)
 
             if len(buffer) >= batch_size:
@@ -179,56 +274,333 @@ def simulate_world_cup(
 
 
 def _simulate_tournament(
-    teams: Sequence[TeamLambda],
+    teams_by_code: dict[str, TeamLambda],
+    fixtures: Sequence[WorldCupFixture],
     simulation_id: int,
     rng: np.random.Generator,
 ) -> list[tuple[object, ...]]:
-    """Simulate one complete knockout bracket and return the rows to persist."""
-    current_round = list(teams)
-    round_index = 1
+    """Simulate one complete World Cup and return rows to persist."""
     rows: list[tuple[object, ...]] = []
+    group_standings = _initial_group_standings(teams_by_code, fixtures)
+    last_played_at: dict[str, datetime] = {}
+    match_results: dict[int, SimulatedMatch] = {}
 
-    while len(current_round) >= 2:
-        round_name = _round_name(len(current_round), round_index)
-        require_winner = True
-        next_round: list[TeamLambda] = []
+    for fixture in sorted(_group_fixtures(fixtures), key=lambda item: item.match_date):
+        home_team = teams_by_code[fixture.home_slot]
+        away_team = teams_by_code[fixture.away_slot]
+        result = _play_fixture(
+            fixture,
+            home_team,
+            away_team,
+            simulation_id,
+            rng,
+            last_played_at,
+            require_winner=False,
+        )
+        _apply_group_result(group_standings, fixture, result)
+        match_results[fixture.match_number] = result
+        rows.append(_row_tuple(result))
 
-        for match_number, pair in enumerate(_pairwise(current_round), start=1):
-            home_team, away_team = pair
-            result = simulate_match(
-                home_team,
-                away_team,
-                require_winner=require_winner,
-                rng=rng,
-            )
-            rows.append(
-                (
-                    simulation_id,
-                    round_name,
-                    match_number,
-                    result.home_team_id,
-                    result.away_team_id,
-                    result.home_team_name,
-                    result.away_team_name,
-                    result.home_lambda,
-                    result.away_lambda,
-                    result.home_goals,
-                    result.away_goals,
-                    result.require_winner,
-                    result.decided_by_penalties,
-                    result.penalty_winner_team_id,
-                    result.winner_team_id,
-                    result.created_at,
-                )
-            )
+    slot_teams = _qualified_slot_teams(group_standings, fixtures)
 
-            winner = home_team if result.winner_team_id == home_team.team_id else away_team
-            next_round.append(winner)
-
-        current_round = next_round
-        round_index += 1
+    for fixture in sorted(_knockout_fixtures(fixtures), key=lambda item: item.match_date):
+        home_team = _resolve_slot(fixture.home_slot, teams_by_code, slot_teams, match_results)
+        away_team = _resolve_slot(fixture.away_slot, teams_by_code, slot_teams, match_results)
+        result = _play_fixture(
+            fixture,
+            home_team,
+            away_team,
+            simulation_id,
+            rng,
+            last_played_at,
+            require_winner=True,
+        )
+        match_results[fixture.match_number] = result
+        rows.append(_row_tuple(result))
 
     return rows
+
+
+def _play_fixture(
+    fixture: WorldCupFixture,
+    home_team: TeamLambda,
+    away_team: TeamLambda,
+    simulation_id: int,
+    rng: np.random.Generator,
+    last_played_at: dict[str, datetime],
+    *,
+    require_winner: bool,
+) -> SimulatedMatch:
+    home_rest_days = _rest_days(last_played_at.get(home_team.team_id), fixture.match_date)
+    away_rest_days = _rest_days(last_played_at.get(away_team.team_id), fixture.match_date)
+    played_score = (
+        (fixture.played_home_goals, fixture.played_away_goals)
+        if fixture.played_home_goals is not None and fixture.played_away_goals is not None
+        else None
+    )
+    result = simulate_match(
+        home_team,
+        away_team,
+        require_winner=require_winner,
+        rng=rng,
+        venue_country=fixture.country,
+        home_rest_days=home_rest_days,
+        away_rest_days=away_rest_days,
+        played_score=played_score,
+    )
+    result = _with_fixture_metadata(result, fixture, simulation_id)
+    last_played_at[home_team.team_id] = fixture.match_date
+    last_played_at[away_team.team_id] = fixture.match_date
+    return result
+
+
+def _with_fixture_metadata(
+    result: SimulatedMatch,
+    fixture: WorldCupFixture,
+    simulation_id: int,
+) -> SimulatedMatch:
+    return SimulatedMatch(
+        simulation_id=simulation_id,
+        round_name=fixture.round_name,
+        group_name=fixture.group_name,
+        match_number=fixture.match_number,
+        match_date=fixture.match_date,
+        stadium=fixture.stadium,
+        city=fixture.city,
+        country=fixture.country,
+        home_team_id=result.home_team_id,
+        away_team_id=result.away_team_id,
+        home_team_name=result.home_team_name,
+        away_team_name=result.away_team_name,
+        home_lambda=result.home_lambda,
+        away_lambda=result.away_lambda,
+        home_goals=result.home_goals,
+        away_goals=result.away_goals,
+        require_winner=result.require_winner,
+        decided_by_penalties=result.decided_by_penalties,
+        penalty_winner_team_id=result.penalty_winner_team_id,
+        winner_team_id=result.winner_team_id,
+        runner_up_team_id=result.runner_up_team_id,
+        home_rest_days=result.home_rest_days,
+        away_rest_days=result.away_rest_days,
+        home_advantage=result.home_advantage,
+        away_advantage=result.away_advantage,
+        created_at=result.created_at,
+    )
+
+
+def _initial_group_standings(
+    teams_by_code: dict[str, TeamLambda],
+    fixtures: Sequence[WorldCupFixture],
+) -> dict[str, dict[str, GroupStanding]]:
+    standings: dict[str, dict[str, GroupStanding]] = defaultdict(dict)
+    for fixture in _group_fixtures(fixtures):
+        group_letter = _group_letter(fixture.group_name)
+        for code in (fixture.home_slot, fixture.away_slot):
+            if code not in standings[group_letter]:
+                standings[group_letter][code] = GroupStanding(
+                    team=teams_by_code[code],
+                    group_letter=group_letter,
+                )
+    return standings
+
+
+def _apply_group_result(
+    standings: dict[str, dict[str, GroupStanding]],
+    fixture: WorldCupFixture,
+    result: SimulatedMatch,
+) -> None:
+    group_letter = _group_letter(fixture.group_name)
+    home = standings[group_letter][result.home_team_id]
+    away = standings[group_letter][result.away_team_id]
+
+    home.played += 1
+    away.played += 1
+    home.goals_for += result.home_goals
+    home.goals_against += result.away_goals
+    away.goals_for += result.away_goals
+    away.goals_against += result.home_goals
+
+    if result.home_goals > result.away_goals:
+        home.points += 3
+        home.wins += 1
+    elif result.away_goals > result.home_goals:
+        away.points += 3
+        away.wins += 1
+    else:
+        home.points += 1
+        away.points += 1
+
+
+def _qualified_slot_teams(
+    standings: dict[str, dict[str, GroupStanding]],
+    fixtures: Sequence[WorldCupFixture],
+) -> dict[str, TeamLambda]:
+    slot_teams: dict[str, TeamLambda] = {}
+    third_place_rows: list[GroupStanding] = []
+
+    for group_letter, group_rows in sorted(standings.items()):
+        ranked = _rank_group(group_rows.values())
+        slot_teams[f"1{group_letter}"] = ranked[0].team
+        slot_teams[f"2{group_letter}"] = ranked[1].team
+        third_place_rows.append(ranked[2])
+
+    third_place_rows = _rank_third_place_teams(third_place_rows)[:8]
+    slot_teams.update(_assign_third_place_slots(third_place_rows, fixtures))
+    return slot_teams
+
+
+def _assign_third_place_slots(
+    third_place_rows: Sequence[GroupStanding],
+    fixtures: Sequence[WorldCupFixture],
+) -> dict[str, TeamLambda]:
+    specs = [
+        slot
+        for fixture in sorted(_round_of_32_fixtures(fixtures), key=lambda item: item.match_number)
+        for slot in (fixture.home_slot, fixture.away_slot)
+        if _is_third_place_slot(slot)
+    ]
+    rank_by_group = {row.group_letter: index for index, row in enumerate(third_place_rows)}
+    team_by_group = {row.group_letter: row.team for row in third_place_rows}
+    assignment = _third_place_slot_assignment(specs, tuple(rank_by_group))
+    return {spec: team_by_group[group_letter] for spec, group_letter in assignment.items()}
+
+
+def _third_place_slot_assignment(
+    specs: Sequence[str],
+    available_groups: tuple[str, ...],
+) -> dict[str, str]:
+    groups_by_spec = {spec: tuple(spec[1:]) for spec in specs}
+
+    def can_complete(index: int, used_groups: frozenset[str]) -> bool:
+        remaining_specs = specs[index:]
+        remaining_groups = tuple(group for group in available_groups if group not in used_groups)
+        if len(remaining_groups) < len(remaining_specs):
+            return False
+        possible_specs = {
+            spec
+            for spec in remaining_specs
+            if any(group in groups_by_spec[spec] for group in remaining_groups)
+        }
+        return len(possible_specs) == len(remaining_specs)
+
+    def assign(index: int, used_groups: frozenset[str]) -> dict[str, str] | None:
+        if index == len(specs):
+            return {}
+        spec = specs[index]
+        candidates = [
+            group
+            for group in available_groups
+            if group not in used_groups and group in groups_by_spec[spec]
+        ]
+        for group in candidates:
+            next_used = used_groups | {group}
+            if not can_complete(index + 1, next_used):
+                continue
+            tail = assign(index + 1, next_used)
+            if tail is not None:
+                return {spec: group, **tail}
+        return None
+
+    assignment = assign(0, frozenset())
+    if assignment is None:
+        raise RuntimeError("Could not assign third-place teams to Round of 32 slots.")
+    return assignment
+
+
+def _rank_group(rows: Iterable[GroupStanding]) -> list[GroupStanding]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            -row.points,
+            -row.goal_difference,
+            -row.goals_for,
+            -row.wins,
+            -row.team.lambda_goals,
+            row.team.team_name,
+        ),
+    )
+
+
+def _rank_third_place_teams(rows: Iterable[GroupStanding]) -> list[GroupStanding]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            -row.points,
+            -row.goal_difference,
+            -row.goals_for,
+            -row.wins,
+            -row.team.lambda_goals,
+            row.group_letter,
+        ),
+    )
+
+
+def _resolve_slot(
+    slot: str,
+    teams_by_code: dict[str, TeamLambda],
+    qualified_slots: dict[str, TeamLambda],
+    match_results: dict[int, SimulatedMatch],
+) -> TeamLambda:
+    if slot in teams_by_code:
+        return teams_by_code[slot]
+    if slot in qualified_slots:
+        return qualified_slots[slot]
+
+    winner_match = re.fullmatch(r"W(\d+)", slot)
+    if winner_match is not None:
+        match = match_results[int(winner_match.group(1))]
+        return _team_from_result(match.winner_team_id, match, teams_by_code)
+
+    runner_up_match = re.fullmatch(r"RU(\d+)", slot)
+    if runner_up_match is not None:
+        match = match_results[int(runner_up_match.group(1))]
+        return _team_from_result(match.runner_up_team_id, match, teams_by_code)
+
+    raise KeyError(f"Unresolved tournament slot: {slot}")
+
+
+def _team_from_result(
+    team_id: str,
+    result: SimulatedMatch,
+    teams_by_code: dict[str, TeamLambda],
+) -> TeamLambda:
+    if team_id in teams_by_code:
+        return teams_by_code[team_id]
+    if team_id == result.home_team_id:
+        return TeamLambda(result.home_team_id, result.home_team_name, result.home_lambda)
+    return TeamLambda(result.away_team_id, result.away_team_name, result.away_lambda)
+
+
+def _row_tuple(result: SimulatedMatch) -> tuple[object, ...]:
+    return (
+        result.simulation_id,
+        result.round_name,
+        result.group_name,
+        result.match_number,
+        result.match_date,
+        result.stadium,
+        result.city,
+        result.country,
+        result.home_team_id,
+        result.away_team_id,
+        result.home_team_name,
+        result.away_team_name,
+        result.home_lambda,
+        result.away_lambda,
+        result.home_goals,
+        result.away_goals,
+        result.require_winner,
+        result.decided_by_penalties,
+        result.penalty_winner_team_id,
+        result.winner_team_id,
+        result.runner_up_team_id,
+        result.home_rest_days,
+        result.away_rest_days,
+        result.home_advantage,
+        result.away_advantage,
+        result.created_at,
+    )
 
 
 def _flush_rows(con: duckdb.DuckDBPyConnection, rows: list[tuple[object, ...]]) -> None:
@@ -238,7 +610,12 @@ def _flush_rows(con: duckdb.DuckDBPyConnection, rows: list[tuple[object, ...]]) 
         INSERT INTO simulated_results (
             simulation_id,
             round_name,
+            group_name,
             match_number,
+            match_date,
+            stadium,
+            city,
+            country,
             home_team_id,
             away_team_id,
             home_team_name,
@@ -251,11 +628,119 @@ def _flush_rows(con: duckdb.DuckDBPyConnection, rows: list[tuple[object, ...]]) 
             decided_by_penalties,
             penalty_winner_team_id,
             winner_team_id,
+            runner_up_team_id,
+            home_rest_days,
+            away_rest_days,
+            home_advantage,
+            away_advantage,
             created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
+
+
+def _migrate_simulated_results(con: duckdb.DuckDBPyConnection) -> None:
+    migration_statements = (
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS group_name VARCHAR",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS match_date TIMESTAMP",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS stadium VARCHAR",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS city VARCHAR",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS country VARCHAR",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS runner_up_team_id VARCHAR",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS home_rest_days DOUBLE",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS away_rest_days DOUBLE",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS home_advantage BOOLEAN",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS away_advantage BOOLEAN",
+    )
+    for statement in migration_statements:
+        con.execute(statement)
+
+
+def _teams_by_code(teams: Sequence[TeamLambda]) -> dict[str, TeamLambda]:
+    by_code: dict[str, TeamLambda] = {}
+    lookup = {_normalize_key(team.team_id): team for team in teams}
+    lookup.update({_normalize_key(team.team_name): team for team in teams})
+
+    for code, official_name in TEAM_NAMES.items():
+        team = next(
+            (
+                lookup[key]
+                for key in _team_lookup_keys(code, official_name)
+                if key in lookup
+            ),
+            None,
+        )
+        if team is None:
+            continue
+        by_code[code] = TeamLambda(
+            team_id=code,
+            team_name=official_name,
+            lambda_goals=team.lambda_goals,
+            country_code=team.country_code or TEAM_COUNTRIES.get(code, code),
+        )
+    return by_code
+
+
+def _team_lookup_keys(code: str, official_name: str) -> tuple[str, ...]:
+    aliases = {
+        "BIH": ("Bosnia", "Bosnia-Herzegovina", "Bosnia and Herzegovina"),
+        "CIV": ("Ivory Coast", "Cote d'Ivoire", "Côte d'Ivoire"),
+        "COD": ("DR Congo", "Congo DR", "Congo Democratic Republic"),
+        "CPV": ("Cape Verde", "Cabo Verde"),
+        "CZE": ("Czech Republic", "Czechia"),
+        "IRN": ("Iran", "IR Iran"),
+        "KOR": ("South Korea", "Korea Republic"),
+        "RSA": ("South Africa",),
+        "SUI": ("Switzerland", "Swiss"),
+        "TUR": ("Turkey", "Türkiye"),
+        "USA": ("United States", "USA", "USMNT"),
+    }
+    names = (code, official_name, *aliases.get(code, ()))
+    return tuple(_normalize_key(name) for name in names)
+
+
+def _validate_schedule_coverage(
+    teams_by_code: dict[str, TeamLambda],
+    fixtures: Sequence[WorldCupFixture],
+) -> None:
+    fixture_team_codes = {
+        slot
+        for fixture in _group_fixtures(fixtures)
+        for slot in (fixture.home_slot, fixture.away_slot)
+    }
+    missing_codes = sorted(fixture_team_codes - set(teams_by_code))
+    if missing_codes:
+        missing_names = ", ".join(
+            f"{code} ({TEAM_NAMES.get(code, code)})" for code in missing_codes
+        )
+        raise ValueError(f"teams is missing World Cup 2026 teams: {missing_names}")
+    if len(fixture_team_codes) != EXPECTED_TEAM_COUNT:
+        raise ValueError(
+            f"expected {EXPECTED_TEAM_COUNT} World Cup teams, got {len(fixture_team_codes)}."
+        )
+
+
+def _group_fixtures(fixtures: Sequence[WorldCupFixture]) -> Iterable[WorldCupFixture]:
+    return (fixture for fixture in fixtures if fixture.round_name == "group_stage")
+
+
+def _knockout_fixtures(fixtures: Sequence[WorldCupFixture]) -> Iterable[WorldCupFixture]:
+    return (fixture for fixture in fixtures if fixture.round_name != "group_stage")
+
+
+def _round_of_32_fixtures(fixtures: Sequence[WorldCupFixture]) -> Iterable[WorldCupFixture]:
+    return (fixture for fixture in fixtures if fixture.round_name == "round_of_32")
+
+
+def _is_third_place_slot(slot: str) -> bool:
+    return bool(re.fullmatch(r"3[A-L]+", slot))
+
+
+def _group_letter(group_name: str | None) -> str:
+    if not group_name:
+        raise ValueError("Group fixture is missing group_name.")
+    return group_name.rsplit(" ", maxsplit=1)[-1]
 
 
 def _resolve_penalties(
@@ -267,26 +752,37 @@ def _resolve_penalties(
     return home_team_id if int(rng.integers(0, 2)) == 0 else away_team_id
 
 
-def _pairwise(items: Sequence[TeamLambda]) -> Iterable[tuple[TeamLambda, TeamLambda]]:
-    """Yield bracket pairs in order."""
-    for index in range(0, len(items), 2):
-        yield items[index], items[index + 1]
+def _adjust_lambda(
+    lambda_goals: float,
+    *,
+    has_host_advantage: bool,
+    own_rest_days: float | None,
+    opponent_rest_days: float | None,
+) -> float:
+    adjusted = max(float(lambda_goals), 0.0)
+    if has_host_advantage:
+        adjusted *= HOST_ADVANTAGE_MULTIPLIER
+    if own_rest_days is not None and opponent_rest_days is not None:
+        rest_edge = max(
+            -MAX_REST_DAY_EDGE,
+            min(MAX_REST_DAY_EDGE, own_rest_days - opponent_rest_days),
+        )
+        adjusted *= max(0.75, 1.0 + rest_edge * REST_DAY_EDGE_MULTIPLIER)
+    return adjusted
 
 
-def _round_name(participants: int, round_index: int) -> str:
-    """Generate a human-readable knockout round label."""
-    labels = {
-        32: "round_of_32",
-        16: "round_of_16",
-        8: "quarterfinal",
-        4: "semifinal",
-        2: "final",
-    }
-    return labels.get(participants, f"round_{round_index}")
+def _has_host_advantage(team: TeamLambda, venue_country: str | None) -> bool:
+    return bool(venue_country and team.country_code == venue_country)
 
 
-def _is_power_of_two(value: int) -> bool:
-    return value > 0 and (value & (value - 1)) == 0
+def _rest_days(previous_match: datetime | None, match_date: datetime) -> float | None:
+    if previous_match is None:
+        return None
+    return (match_date - previous_match).total_seconds() / 86_400
+
+
+def _normalize_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
 def main() -> int:
