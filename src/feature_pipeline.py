@@ -25,11 +25,20 @@ except ImportError:  # pragma: no cover - supports direct script execution.
 LOGGER = logging.getLogger(__name__)
 
 
-def build_feature_frame(db_path: Path = DB_PATH) -> pl.DataFrame:
+def build_feature_frame(
+    db_path: Path = DB_PATH,
+    *,
+    include_current_world_cup: bool = False,
+    include_metadata: bool = False,
+) -> pl.DataFrame:
     """Build the final training dataframe.
 
     Args:
         db_path: Path to the DuckDB warehouse.
+        include_current_world_cup: Whether to include scored 2026 World Cup rows.
+            Keep this false for model training.
+        include_metadata: Whether to keep match metadata needed for temporal
+            validation and holdout evaluation.
 
     Returns:
         A Polars DataFrame containing only predictive features and the target.
@@ -48,9 +57,12 @@ def build_feature_frame(db_path: Path = DB_PATH) -> pl.DataFrame:
 
     with duckdb.connect(str(db_path), read_only=True) as con:
         _validate_sources(con)
-        base_df = _load_consolidated_matches(con)
+        base_df = _load_consolidated_matches(
+            con,
+            include_current_world_cup=include_current_world_cup,
+        )
 
-    feature_df = _build_team_level_features(base_df)
+    feature_df = _build_team_level_features(base_df, include_metadata=include_metadata)
     LOGGER.info("Feature frame built with %d rows and %d columns.", *feature_df.shape)
     return feature_df
 
@@ -84,7 +96,11 @@ def _validate_sources(con: duckdb.DuckDBPyConnection) -> None:
         raise RuntimeError("f_elo_history is empty. Run the World Cup Probability Elo step first.")
 
 
-def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
+def _load_consolidated_matches(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    include_current_world_cup: bool = False,
+) -> pl.DataFrame:
     """Read the consolidated match-level relation from DuckDB into Polars."""
     has_world_football_elo_ratings = _world_football_elo_ratings_tables_available(con)
     has_fifa_world_ranking = _fifa_world_ranking_tables_available(con)
@@ -216,6 +232,8 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
         date_expr="m.match_date",
         competition_expr="m.competition",
     )
+    current_world_cup_flag = f"NOT ({current_world_cup_exclusion})"
+    training_scope_filter = "TRUE" if include_current_world_cup else current_world_cup_exclusion
     fifa_world_ranking_joins = (
         f"""
         LEFT JOIN d_fifa_world_ranking_team_aliases AS hfa
@@ -247,7 +265,8 @@ def _load_consolidated_matches(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
         world_football_elo_ratings_joins=world_football_elo_ratings_joins,
         fifa_world_ranking_joins=fifa_world_ranking_joins,
         squad_attribute_joins=squad_attribute_joins,
-        current_world_cup_exclusion=current_world_cup_exclusion,
+        current_world_cup_flag=current_world_cup_flag,
+        current_world_cup_exclusion=training_scope_filter,
     )
     relation = con.sql(query)
     return relation.pl()
@@ -298,7 +317,11 @@ def _squad_attributes_table_available(con: duckdb.DuckDBPyConnection) -> bool:
     )
 
 
-def _build_team_level_features(match_df: pl.DataFrame) -> pl.DataFrame:
+def _build_team_level_features(
+    match_df: pl.DataFrame,
+    *,
+    include_metadata: bool = False,
+) -> pl.DataFrame:
     """Derive recent-form features and collapse the dataset back to match level."""
     home_team = _build_side_frame(match_df, side="home")
     away_team = _build_side_frame(match_df, side="away")
@@ -313,40 +336,43 @@ def _build_team_level_features(match_df: pl.DataFrame) -> pl.DataFrame:
         suffix="_away",
     )
 
-    feature_df = matched.select(
-        [
-            (
-                pl.col("team_world_cup_probability_elo_before")
-                - pl.col("team_world_cup_probability_elo_before_away")
-            ).alias("world_cup_probability_elo_diff"),
-            (
-                pl.col("team_world_football_elo_ratings")
-                - pl.col("team_world_football_elo_ratings_away")
-            ).alias("world_football_elo_ratings_diff"),
-            (
-                pl.col("team_fifa_world_ranking_points")
-                - pl.col("team_fifa_world_ranking_points_away")
-            ).alias("fifa_world_ranking_points_diff"),
-            (
-                pl.col("team_fifa_world_ranking_rank_away") - pl.col("team_fifa_world_ranking_rank")
-            ).alias("fifa_world_ranking_rank_diff"),
-            (pl.col("team_market_value_eur") - pl.col("team_market_value_eur_away")).alias(
-                "market_value_diff"
-            ),
-            (pl.col("team_avg_overall") - pl.col("team_avg_overall_away")).alias(
-                "avg_overall_diff"
-            ),
-            (pl.col("team_avg_pace") - pl.col("team_avg_pace_away")).alias("avg_pace_diff"),
-            (pl.col("team_avg_stamina") - pl.col("team_avg_stamina_away")).alias(
-                "avg_stamina_diff"
-            ),
-            (pl.col("team_squad_depth_proxy") - pl.col("team_squad_depth_proxy_away")).alias(
-                "squad_depth_proxy"
-            ),
-            (pl.col("recent_form") - pl.col("recent_form_away")).alias("recent_form_diff"),
-            pl.col("target"),
+    feature_columns = [
+        (
+            pl.col("team_world_cup_probability_elo_before")
+            - pl.col("team_world_cup_probability_elo_before_away")
+        ).alias("world_cup_probability_elo_diff"),
+        (
+            pl.col("team_world_football_elo_ratings")
+            - pl.col("team_world_football_elo_ratings_away")
+        ).alias("world_football_elo_ratings_diff"),
+        (
+            pl.col("team_fifa_world_ranking_points") - pl.col("team_fifa_world_ranking_points_away")
+        ).alias("fifa_world_ranking_points_diff"),
+        (
+            pl.col("team_fifa_world_ranking_rank_away") - pl.col("team_fifa_world_ranking_rank")
+        ).alias("fifa_world_ranking_rank_diff"),
+        (pl.col("team_market_value_eur") - pl.col("team_market_value_eur_away")).alias(
+            "market_value_diff"
+        ),
+        (pl.col("team_avg_overall") - pl.col("team_avg_overall_away")).alias("avg_overall_diff"),
+        (pl.col("team_avg_pace") - pl.col("team_avg_pace_away")).alias("avg_pace_diff"),
+        (pl.col("team_avg_stamina") - pl.col("team_avg_stamina_away")).alias("avg_stamina_diff"),
+        (pl.col("team_squad_depth_proxy") - pl.col("team_squad_depth_proxy_away")).alias(
+            "squad_depth_proxy"
+        ),
+        (pl.col("recent_form") - pl.col("recent_form_away")).alias("recent_form_diff"),
+        pl.col("target"),
+    ]
+    if include_metadata:
+        feature_columns = [
+            pl.col("match_id"),
+            pl.col("match_date"),
+            pl.col("competition"),
+            pl.col("is_current_world_cup"),
+            *feature_columns,
         ]
-    )
+
+    feature_df = matched.select(feature_columns)
 
     return feature_df
 
@@ -361,6 +387,8 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
             [
                 pl.col("match_id"),
                 pl.col("match_date"),
+                pl.col("competition"),
+                pl.col("is_current_world_cup"),
                 pl.lit("home").alias("side"),
                 pl.col("home_team_id").alias("team"),
                 pl.col("away_team_id").alias("opponent"),
@@ -400,6 +428,8 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
         [
             pl.col("match_id"),
             pl.col("match_date"),
+            pl.col("competition"),
+            pl.col("is_current_world_cup"),
             pl.lit("away").alias("side"),
             pl.col("away_team_id").alias("team"),
             pl.col("home_team_id").alias("opponent"),
@@ -433,33 +463,16 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
 
 
 def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
-    """Compute recent form using rolling means over the team partition.
-
-    The current match is excluded from the window by shifting one row before the
-    rolling average is computed.
-    """
+    """Compute recent form using only prior non-holdout rows for each team."""
     sorted_df = team_df.sort(["team", "match_date", "match_id"])
-
-    enriched = sorted_df.with_columns(
-        [
-            pl.col("goals_for")
-            .shift(1)
-            .rolling_mean(window_size=5, min_periods=1)
-            .over("team")
-            .fill_null(0.0)
-            .alias("goals_for_last5"),
-            pl.col("goals_against")
-            .shift(1)
-            .rolling_mean(window_size=5, min_periods=1)
-            .over("team")
-            .fill_null(0.0)
-            .alias("goals_against_last5"),
-        ]
-    ).with_columns((pl.col("goals_for_last5") - pl.col("goals_against_last5")).alias("recent_form"))
+    enriched = sorted_df.group_by("team", maintain_order=True).map_groups(_recent_form_for_team)
 
     return enriched.select(
         [
             pl.col("match_id"),
+            pl.col("match_date"),
+            pl.col("competition"),
+            pl.col("is_current_world_cup"),
             pl.col("team_world_cup_probability_elo_before"),
             pl.col("opponent_world_cup_probability_elo_before"),
             pl.col("team_world_football_elo_ratings"),
@@ -482,6 +495,31 @@ def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("target"),
         ]
     )
+
+
+def _recent_form_for_team(team_df: pl.DataFrame) -> pl.DataFrame:
+    """Compute recent form without letting 2026 World Cup rows enter history."""
+    goals_for_history: list[float] = []
+    goals_against_history: list[float] = []
+    recent_form: list[float] = []
+
+    for row in team_df.iter_rows(named=True):
+        if goals_for_history:
+            recent_goals_for = goals_for_history[-5:]
+            recent_goals_against = goals_against_history[-5:]
+            form = (sum(recent_goals_for) / len(recent_goals_for)) - (
+                sum(recent_goals_against) / len(recent_goals_against)
+            )
+        else:
+            form = 0.0
+
+        recent_form.append(form)
+
+        if not bool(row["is_current_world_cup"]):
+            goals_for_history.append(float(row["goals_for"]))
+            goals_against_history.append(float(row["goals_against"]))
+
+    return team_df.with_columns(pl.Series("recent_form", recent_form))
 
 
 def main() -> int:
