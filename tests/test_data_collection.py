@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 import pytest
 
+import src.data_collection as data_collection
 from src.data_collection import (
     TransfermarktMarketValue,
     download_kaggle_dataset,
@@ -15,6 +17,7 @@ from src.data_collection import (
     persist_transfermarkt_market_values,
     read_transfermarkt_manifest,
     read_transfermarkt_raw,
+    run_downloads,
     write_transfermarkt_raw,
 )
 
@@ -170,3 +173,126 @@ def test_transfermarkt_manifest_accepts_search_only_targets(tmp_path: Path) -> N
 def test_download_kaggle_dataset_rejects_placeholder_slug(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not the README placeholder"):
         download_kaggle_dataset("owner/dataset", tmp_path / "raw")
+
+
+def test_download_kaggle_dataset_skips_when_raw_files_exist(tmp_path: Path) -> None:
+    class FakeKaggleClient:
+        authenticated = False
+        downloaded = False
+
+        def authenticate(self) -> None:
+            self.authenticated = True
+
+        def dataset_download_files(
+            self,
+            dataset: str,
+            path: str | None = None,
+            force: bool = False,
+            quiet: bool = True,
+            unzip: bool = False,
+            licenses: tuple[str, ...] = (),
+        ) -> None:
+            self.downloaded = True
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "results.csv").write_text("date,home_team\n", encoding="utf-8")
+    client = FakeKaggleClient()
+
+    result = download_kaggle_dataset("example/dataset", raw_dir, client=client)
+
+    assert result == raw_dir
+    assert not client.authenticated
+    assert not client.downloaded
+
+
+def test_download_kaggle_dataset_force_downloads_existing_raw(tmp_path: Path) -> None:
+    class FakeKaggleClient:
+        authenticated = False
+        downloaded = False
+
+        def authenticate(self) -> None:
+            self.authenticated = True
+
+        def dataset_download_files(
+            self,
+            dataset: str,
+            path: str | None = None,
+            force: bool = False,
+            quiet: bool = True,
+            unzip: bool = False,
+            licenses: tuple[str, ...] = (),
+        ) -> None:
+            self.downloaded = True
+            assert force
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "results.csv").write_text("date,home_team\n", encoding="utf-8")
+    client = FakeKaggleClient()
+
+    result = download_kaggle_dataset("example/dataset", raw_dir, client=client, force=True)
+
+    assert result == raw_dir
+    assert client.authenticated
+    assert client.downloaded
+
+
+def test_run_downloads_skips_existing_fbref_raw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fbref_dir = tmp_path / "raw" / "fbref"
+    fbref_dir.mkdir(parents=True)
+    (fbref_dir / "fbref_schedule.parquet").write_bytes(b"schedule")
+    (fbref_dir / "fbref_team_stats.parquet").write_bytes(b"team-stats")
+
+    def fail_fetch(*args: object, **kwargs: object) -> list[Path]:
+        raise AssertionError("FBref download should not run when raw files exist.")
+
+    monkeypatch.setattr(data_collection, "fetch_fbref_with_soccerdata", fail_fetch)
+
+    result = run_downloads(
+        SimpleNamespace(
+            raw_dir=tmp_path / "raw",
+            sources=["fbref"],
+            force_download=False,
+            fbref_leagues=["INT-World Cup"],
+            fbref_seasons=["2022"],
+            fbref_no_cache=False,
+            ea_fc_dataset="",
+            transfermarkt_manifest=None,
+        )
+    )
+
+    assert result == [fbref_dir]
+
+
+def test_run_downloads_skips_existing_transfermarkt_raw_without_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transfermarkt_dir = tmp_path / "raw" / "transfermarkt"
+    transfermarkt_dir.mkdir(parents=True)
+    raw_file = transfermarkt_dir / "market_values_20260621T120000Z.jsonl"
+    raw_file.write_text("{}\n", encoding="utf-8")
+
+    def fail_scrape(*args: object, **kwargs: object) -> list[TransfermarktMarketValue]:
+        raise AssertionError("Transfermarkt scrape should not run when raw files exist.")
+
+    monkeypatch.setattr(data_collection, "scrape_transfermarkt_market_values", fail_scrape)
+
+    result = run_downloads(
+        SimpleNamespace(
+            raw_dir=tmp_path / "raw",
+            sources=["transfermarkt"],
+            force_download=False,
+            fbref_leagues=[],
+            fbref_seasons=[],
+            fbref_no_cache=False,
+            ea_fc_dataset="",
+            transfermarkt_manifest=None,
+        )
+    )
+
+    assert result == [raw_file]
