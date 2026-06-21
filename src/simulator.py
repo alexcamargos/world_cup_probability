@@ -7,6 +7,7 @@ and resolves the published knockout slots through the final.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import re
 from collections import defaultdict
@@ -17,8 +18,10 @@ from pathlib import Path
 
 import duckdb
 import numpy as np
+import xgboost as xgb
 
 try:
+    from .analytics import export_analytics
     from .world_cup_2026_schedule import (
         TEAM_COUNTRIES,
         TEAM_NAMES,
@@ -26,6 +29,7 @@ try:
         world_cup_2026_fixtures,
     )
 except ImportError:  # pragma: no cover - supports direct script execution.
+    from analytics import export_analytics
     from world_cup_2026_schedule import (  # type: ignore[no-redef]
         TEAM_COUNTRIES,
         TEAM_NAMES,
@@ -37,11 +41,16 @@ LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "warehouse" / "world_cup.duckdb"
+MODEL_PATH = PROJECT_ROOT / "models" / "xgb_poisson_model.json"
 
 HOST_ADVANTAGE_MULTIPLIER = 1.10
 REST_DAY_EDGE_MULTIPLIER = 0.03
 MAX_REST_DAY_EDGE = 3.0
 EXPECTED_TEAM_COUNT = 48
+EXPECTED_MATCH_COUNT = 104
+DEFAULT_ITERATIONS = 100_000
+DEFAULT_BATCH_SIZE = 2_500
+DEFAULT_SEED = 42
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,11 +105,23 @@ class GroupStanding:
     points: int = 0
     goals_for: int = 0
     goals_against: int = 0
-    wins: int = 0
+    fair_play_points: int = 0
+    lot_draw_order: int = 0
 
     @property
     def goal_difference(self) -> int:
         return self.goals_for - self.goals_against
+
+
+@dataclass(frozen=True, slots=True)
+class GroupMatchResult:
+    """Completed group-stage match used for ranking tie-breakers."""
+
+    group_letter: str
+    home_team_id: str
+    away_team_id: str
+    home_goals: int
+    away_goals: int
 
 
 def initialize_simulated_results(db_path: Path = DB_PATH) -> None:
@@ -244,11 +265,18 @@ def simulate_world_cup(
         raise ValueError("batch_size must be greater than zero.")
 
     tournament_fixtures = tuple(fixtures or world_cup_2026_fixtures())
+    _validate_tournament_shape(tournament_fixtures)
     teams_by_code = _teams_by_code(teams)
     _validate_schedule_coverage(teams_by_code, tournament_fixtures)
 
     initialize_simulated_results(db_path)
     rng = np.random.default_rng(seed)
+    progress_interval = _simulation_progress_interval(iterations)
+    LOGGER.info(
+        "Starting %d Monte Carlo tournament simulations (%d matches per tournament).",
+        iterations,
+        len(tournament_fixtures),
+    )
 
     with duckdb.connect(str(db_path)) as con:
         con.execute("DELETE FROM simulated_results")
@@ -262,6 +290,13 @@ def simulate_world_cup(
                 rng,
             )
             buffer.extend(tournament_rows)
+            if _should_log_simulation_progress(simulation_id, iterations, progress_interval):
+                LOGGER.info(
+                    "Simulation progress: tournament %d/%d completed (%.1f%% complete).",
+                    simulation_id,
+                    iterations,
+                    100 * simulation_id / iterations,
+                )
 
             if len(buffer) >= batch_size:
                 _flush_rows(con, buffer)
@@ -273,6 +308,22 @@ def simulate_world_cup(
     LOGGER.info("Finished %d Monte Carlo simulations.", iterations)
 
 
+def _simulation_progress_interval(iterations: int) -> int:
+    return max(1, min(1_000, iterations // 100 or 1))
+
+
+def _should_log_simulation_progress(
+    simulation_id: int,
+    iterations: int,
+    progress_interval: int,
+) -> bool:
+    return (
+        simulation_id == 1
+        or simulation_id == iterations
+        or simulation_id % progress_interval == 0
+    )
+
+
 def _simulate_tournament(
     teams_by_code: dict[str, TeamLambda],
     fixtures: Sequence[WorldCupFixture],
@@ -281,7 +332,8 @@ def _simulate_tournament(
 ) -> list[tuple[object, ...]]:
     """Simulate one complete World Cup and return rows to persist."""
     rows: list[tuple[object, ...]] = []
-    group_standings = _initial_group_standings(teams_by_code, fixtures)
+    group_standings = _initial_group_standings(teams_by_code, fixtures, rng)
+    group_match_results: list[GroupMatchResult] = []
     last_played_at: dict[str, datetime] = {}
     match_results: dict[int, SimulatedMatch] = {}
 
@@ -298,10 +350,11 @@ def _simulate_tournament(
             require_winner=False,
         )
         _apply_group_result(group_standings, fixture, result)
+        group_match_results.append(_group_match_result(fixture, result))
         match_results[fixture.match_number] = result
         rows.append(_row_tuple(result))
 
-    slot_teams = _qualified_slot_teams(group_standings, fixtures)
+    slot_teams = _qualified_slot_teams(group_standings, group_match_results, fixtures)
 
     for fixture in sorted(_knockout_fixtures(fixtures), key=lambda item: item.match_date):
         home_team = _resolve_slot(fixture.home_slot, teams_by_code, slot_teams, match_results)
@@ -392,6 +445,7 @@ def _with_fixture_metadata(
 def _initial_group_standings(
     teams_by_code: dict[str, TeamLambda],
     fixtures: Sequence[WorldCupFixture],
+    rng: np.random.Generator,
 ) -> dict[str, dict[str, GroupStanding]]:
     standings: dict[str, dict[str, GroupStanding]] = defaultdict(dict)
     for fixture in _group_fixtures(fixtures):
@@ -402,6 +456,10 @@ def _initial_group_standings(
                     team=teams_by_code[code],
                     group_letter=group_letter,
                 )
+    for group_rows in standings.values():
+        lot_order = rng.permutation(len(group_rows))
+        for order, code in zip(lot_order, sorted(group_rows), strict=True):
+            group_rows[code].lot_draw_order = int(order)
     return standings
 
 
@@ -423,24 +481,36 @@ def _apply_group_result(
 
     if result.home_goals > result.away_goals:
         home.points += 3
-        home.wins += 1
     elif result.away_goals > result.home_goals:
         away.points += 3
-        away.wins += 1
     else:
         home.points += 1
         away.points += 1
 
 
+def _group_match_result(
+    fixture: WorldCupFixture,
+    result: SimulatedMatch,
+) -> GroupMatchResult:
+    return GroupMatchResult(
+        group_letter=_group_letter(fixture.group_name),
+        home_team_id=result.home_team_id,
+        away_team_id=result.away_team_id,
+        home_goals=result.home_goals,
+        away_goals=result.away_goals,
+    )
+
+
 def _qualified_slot_teams(
     standings: dict[str, dict[str, GroupStanding]],
+    group_match_results: Sequence[GroupMatchResult],
     fixtures: Sequence[WorldCupFixture],
 ) -> dict[str, TeamLambda]:
     slot_teams: dict[str, TeamLambda] = {}
     third_place_rows: list[GroupStanding] = []
 
     for group_letter, group_rows in sorted(standings.items()):
-        ranked = _rank_group(group_rows.values())
+        ranked = _rank_group(group_rows.values(), group_match_results)
         slot_teams[f"1{group_letter}"] = ranked[0].team
         slot_teams[f"2{group_letter}"] = ranked[1].team
         third_place_rows.append(ranked[2])
@@ -508,16 +578,27 @@ def _third_place_slot_assignment(
     return assignment
 
 
-def _rank_group(rows: Iterable[GroupStanding]) -> list[GroupStanding]:
+def _rank_group(
+    rows: Iterable[GroupStanding],
+    group_match_results: Sequence[GroupMatchResult],
+) -> list[GroupStanding]:
+    """Rank a group with FIFA-style table and head-to-head tie-breakers."""
+    standings = list(rows)
+    matches = [
+        match
+        for match in group_match_results
+        if standings and match.group_letter == standings[0].group_letter
+    ]
+
     return sorted(
-        rows,
+        standings,
         key=lambda row: (
             -row.points,
             -row.goal_difference,
             -row.goals_for,
-            -row.wins,
-            -row.team.lambda_goals,
-            row.team.team_name,
+            _head_to_head_sort_key(row, standings, matches),
+            row.fair_play_points,
+            row.lot_draw_order,
         ),
     )
 
@@ -529,11 +610,55 @@ def _rank_third_place_teams(rows: Iterable[GroupStanding]) -> list[GroupStanding
             -row.points,
             -row.goal_difference,
             -row.goals_for,
-            -row.wins,
-            -row.team.lambda_goals,
+            row.fair_play_points,
+            row.lot_draw_order,
             row.group_letter,
         ),
     )
+
+
+def _head_to_head_sort_key(
+    row: GroupStanding,
+    all_rows: Sequence[GroupStanding],
+    group_match_results: Sequence[GroupMatchResult],
+) -> tuple[int, int, int]:
+    tied_team_ids = [
+        candidate.team.team_id
+        for candidate in all_rows
+        if (
+            candidate.points,
+            candidate.goal_difference,
+            candidate.goals_for,
+        )
+        == (row.points, row.goal_difference, row.goals_for)
+    ]
+    if len(tied_team_ids) < 2:
+        return (0, 0, 0)
+
+    tied_ids = set(tied_team_ids)
+    points = 0
+    goals_for = 0
+    goals_against = 0
+
+    for match in group_match_results:
+        if match.home_team_id not in tied_ids or match.away_team_id not in tied_ids:
+            continue
+        if row.team.team_id == match.home_team_id:
+            goals_for += match.home_goals
+            goals_against += match.away_goals
+            if match.home_goals > match.away_goals:
+                points += 3
+            elif match.home_goals == match.away_goals:
+                points += 1
+        elif row.team.team_id == match.away_team_id:
+            goals_for += match.away_goals
+            goals_against += match.home_goals
+            if match.away_goals > match.home_goals:
+                points += 3
+            elif match.away_goals == match.home_goals:
+                points += 1
+
+    return (-points, -(goals_for - goals_against), -goals_for)
 
 
 def _resolve_slot(
@@ -664,11 +789,7 @@ def _teams_by_code(teams: Sequence[TeamLambda]) -> dict[str, TeamLambda]:
 
     for code, official_name in TEAM_NAMES.items():
         team = next(
-            (
-                lookup[key]
-                for key in _team_lookup_keys(code, official_name)
-                if key in lookup
-            ),
+            (lookup[key] for key in _team_lookup_keys(code, official_name) if key in lookup),
             None,
         )
         if team is None:
@@ -719,6 +840,53 @@ def _validate_schedule_coverage(
         raise ValueError(
             f"expected {EXPECTED_TEAM_COUNT} World Cup teams, got {len(fixture_team_codes)}."
         )
+
+
+def _validate_tournament_shape(fixtures: Sequence[WorldCupFixture]) -> None:
+    if len(fixtures) != EXPECTED_MATCH_COUNT:
+        raise ValueError(
+            f"expected {EXPECTED_MATCH_COUNT} World Cup fixtures, got {len(fixtures)}."
+        )
+
+    match_numbers = sorted(fixture.match_number for fixture in fixtures)
+    expected_match_numbers = list(range(1, EXPECTED_MATCH_COUNT + 1))
+    if match_numbers != expected_match_numbers:
+        raise ValueError("World Cup fixtures must have match numbers 1 through 104 exactly once.")
+
+    round_counts = {
+        "group_stage": 72,
+        "round_of_32": 16,
+        "round_of_16": 8,
+        "quarterfinal": 4,
+        "semifinal": 2,
+        "third_place": 1,
+        "final": 1,
+    }
+    for round_name, expected_count in round_counts.items():
+        actual_count = sum(fixture.round_name == round_name for fixture in fixtures)
+        if actual_count != expected_count:
+            raise ValueError(
+                f"expected {expected_count} {round_name} fixtures, got {actual_count}."
+            )
+
+    groups: dict[str, list[WorldCupFixture]] = defaultdict(list)
+    for fixture in _group_fixtures(fixtures):
+        groups[_group_letter(fixture.group_name)].append(fixture)
+
+    if sorted(groups) != list("ABCDEFGHIJKL"):
+        raise ValueError("World Cup group fixtures must contain groups A through L.")
+
+    for group_letter, group_fixtures in groups.items():
+        group_team_codes = {
+            slot for fixture in group_fixtures for slot in (fixture.home_slot, fixture.away_slot)
+        }
+        if len(group_team_codes) != 4:
+            raise ValueError(f"Group {group_letter} must contain exactly four teams.")
+        pairings = {
+            tuple(sorted((fixture.home_slot, fixture.away_slot))) for fixture in group_fixtures
+        }
+        if len(group_fixtures) != 6 or len(pairings) != 6:
+            raise ValueError(f"Group {group_letter} must contain six unique pairings.")
 
 
 def _group_fixtures(fixtures: Sequence[WorldCupFixture]) -> Iterable[WorldCupFixture]:
@@ -785,9 +953,112 @@ def _normalize_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """Build CLI parser for standalone tournament simulations."""
+    parser = argparse.ArgumentParser(
+        description="Run FIFA World Cup 2026 Monte Carlo simulations from project data.",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=DEFAULT_ITERATIONS,
+        help="Number of complete tournament simulations.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Batch size used when inserting rows into DuckDB.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help="Optional random seed for reproducible simulations.",
+    )
+    parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DB_PATH,
+        help="DuckDB warehouse path.",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=MODEL_PATH,
+        help="Trained XGBoost Poisson model path.",
+    )
+    parser.add_argument(
+        "--export-analytics",
+        action="store_true",
+        help="Export analytics CSVs after the simulation finishes.",
+    )
+    return parser
+
+
+def run_simulation_from_project_data(
+    *,
+    db_path: Path = DB_PATH,
+    model_path: Path = MODEL_PATH,
+    iterations: int = DEFAULT_ITERATIONS,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    seed: int | None = DEFAULT_SEED,
+    export_reports: bool = False,
+) -> None:
+    """Build team lambdas from the local warehouse/model and simulate the tournament."""
+    if not db_path.exists():
+        raise FileNotFoundError(
+            f"DuckDB warehouse not found: {db_path}. "
+            "Run `uv run pipeline` or `uv run db-init` first."
+        )
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Model not found: {model_path}. Run `uv run train-model` before `uv run simulate`."
+        )
+
+    model = _load_poisson_model(model_path)
+    team_lambdas = _build_world_cup_team_lambdas_from_project_data(db_path=db_path, model=model)
+    simulate_world_cup(
+        team_lambdas,
+        iterations=iterations,
+        batch_size=batch_size,
+        db_path=db_path,
+        seed=seed,
+    )
+    if export_reports:
+        export_analytics(db_path=db_path)
+
+
+def _load_poisson_model(model_path: Path) -> xgb.XGBRegressor:
+    model = xgb.XGBRegressor()
+    model.load_model(str(model_path))
+    return model
+
+
+def _build_world_cup_team_lambdas_from_project_data(
+    *,
+    db_path: Path,
+    model: xgb.XGBRegressor,
+) -> list[TeamLambda]:
+    try:
+        from .orchestrator import _build_team_lambdas
+    except ImportError:  # pragma: no cover - supports direct script execution.
+        from orchestrator import _build_team_lambdas  # type: ignore[no-redef]
+
+    return _build_team_lambdas(db_path=db_path, model=model)
+
+
 def main() -> int:
     """CLI entrypoint."""
-    LOGGER.info("Simulator module loaded. Import and call simulate_world_cup().")
+    args = build_parser().parse_args()
+    run_simulation_from_project_data(
+        db_path=args.db_path,
+        model_path=args.model_path,
+        iterations=args.iterations,
+        batch_size=args.batch_size,
+        seed=args.seed,
+        export_reports=args.export_analytics,
+    )
     return 0
 
 
