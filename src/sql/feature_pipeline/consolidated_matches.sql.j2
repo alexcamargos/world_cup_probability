@@ -19,6 +19,26 @@ SELECT
     {{ away_fifa_points_expr }} AS away_fifa_world_ranking_points,
     {{ home_fifa_rank_expr }} AS home_fifa_world_ranking_rank,
     {{ away_fifa_rank_expr }} AS away_fifa_world_ranking_rank,
+    {{ home_prior_world_cup_appearances_expr }} AS home_prior_world_cup_appearances,
+    {{ away_prior_world_cup_appearances_expr }} AS away_prior_world_cup_appearances,
+    {{ home_prior_world_cup_points_per_match_expr }} AS home_prior_world_cup_points_per_match,
+    {{ away_prior_world_cup_points_per_match_expr }} AS away_prior_world_cup_points_per_match,
+    {{ home_prior_world_cup_goal_diff_per_match_expr }}
+        AS home_prior_world_cup_goal_diff_per_match,
+    {{ away_prior_world_cup_goal_diff_per_match_expr }}
+        AS away_prior_world_cup_goal_diff_per_match,
+    {{ home_prior_world_cup_yellow_cards_per_match_expr }}
+        AS home_prior_world_cup_yellow_cards_per_match,
+    {{ away_prior_world_cup_yellow_cards_per_match_expr }}
+        AS away_prior_world_cup_yellow_cards_per_match,
+    {{ home_prior_world_cup_sending_offs_per_match_expr }}
+        AS home_prior_world_cup_sending_offs_per_match,
+    {{ away_prior_world_cup_sending_offs_per_match_expr }}
+        AS away_prior_world_cup_sending_offs_per_match,
+    {{ home_prior_world_cup_fair_play_penalty_per_match_expr }}
+        AS home_prior_world_cup_fair_play_penalty_per_match,
+    {{ away_prior_world_cup_fair_play_penalty_per_match_expr }}
+        AS away_prior_world_cup_fair_play_penalty_per_match,
     {{ home_squad_attribute_selects }}
     {{ away_squad_attribute_selects }}
     COALESCE(ht.market_value_eur, 0.0) AS home_market_value_eur,
@@ -28,6 +48,8 @@ INNER JOIN f_elo_history AS e
     ON m.match_id = e.match_id
 {{ world_football_elo_ratings_joins }}
 {{ fifa_world_ranking_joins }}
+{{ world_cup_prior_history_joins }}
+{{ world_cup_prior_discipline_joins }}
 {{ squad_attribute_joins }}
 LEFT JOIN d_teams AS ht
     ON m.home_team_id = ht.team_id
