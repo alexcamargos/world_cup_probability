@@ -8,6 +8,11 @@ repos:
 
   - repo: local
     hooks:
+      - id: sqlfluff-lint
+        name: sqlfluff lint
+        entry: uv run sqlfluff lint --config pyproject.toml
+        language: system
+        files: ^src/sql/.*\.sql(\.j2)?$
       - id: pytest
         name: pytest
         entry: uv run pytest
