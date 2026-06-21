@@ -10,6 +10,7 @@ SELECT
     m.home_team_score,
     m.away_team_score,
     m.neutral_site,
+    {{ current_world_cup_flag }} AS is_current_world_cup,
     e.home_rating_before AS home_world_cup_probability_elo_before,
     e.away_rating_before AS away_world_cup_probability_elo_before,
     {{ home_world_football_elo_ratings_expr }} AS home_world_football_elo_ratings,
