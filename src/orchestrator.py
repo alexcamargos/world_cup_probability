@@ -1,7 +1,8 @@
 """Project orchestrator for the full World Cup pipeline.
 
 The execution order is:
-db_init -> World Cup Probability Elo -> World Football Elo Ratings -> features -> model -> simulator
+db_init -> World Cup Probability Elo -> World Football Elo Ratings -> FIFA World Ranking
+-> features -> model -> simulator
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ try:
     from .elo_engine import DB_PATH as WAREHOUSE_DB_PATH
     from .elo_engine import build_elo_history
     from .feature_pipeline import build_feature_frame
+    from .fifa_world_ranking import load_fifa_world_ranking
     from .model import (
         BEESWARM_PATH,
         FEATURE_COLUMNS,
@@ -38,6 +40,7 @@ except ImportError:  # pragma: no cover - supports direct script execution.
     from elo_engine import DB_PATH as WAREHOUSE_DB_PATH
     from elo_engine import build_elo_history
     from feature_pipeline import build_feature_frame
+    from fifa_world_ranking import load_fifa_world_ranking
     from model import (
         BEESWARM_PATH,
         FEATURE_COLUMNS,
@@ -126,25 +129,28 @@ def run_pipeline(
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
 
-    LOGGER.info("Step 1/7: initializing DuckDB warehouse.")
+    LOGGER.info("Step 1/8: initializing DuckDB warehouse.")
     initialize_database(db_path=config.db_path)
 
-    LOGGER.info("Step 2/7: building World Cup Probability Elo history.")
+    LOGGER.info("Step 2/8: building World Cup Probability Elo history.")
     build_elo_history(db_path=config.db_path)
 
-    LOGGER.info("Step 3/7: loading World Football Elo Ratings snapshot.")
+    LOGGER.info("Step 3/8: loading World Football Elo Ratings snapshot.")
     load_world_football_elo_ratings(db_path=config.db_path)
 
-    LOGGER.info("Step 4/7: building feature frame.")
+    LOGGER.info("Step 4/8: loading FIFA World Ranking snapshot.")
+    load_fifa_world_ranking(db_path=config.db_path)
+
+    LOGGER.info("Step 5/8: building feature frame.")
     feature_frame = build_feature_frame(db_path=config.db_path)
 
-    LOGGER.info("Step 5/7: training Poisson XGBoost model.")
+    LOGGER.info("Step 6/8: training Poisson XGBoost model.")
     X_train, X_valid, y_train, y_valid, feature_names = prepare_matrices(feature_frame)
     model = train_poisson_model(X_train, y_train, X_valid, y_valid)
     save_model(model, MODEL_PATH)
     explain_model(model, X_valid, feature_names, BEESWARM_PATH)
 
-    LOGGER.info("Step 6/7: building team lambdas and running Monte Carlo simulation.")
+    LOGGER.info("Step 7/8: building team lambdas and running Monte Carlo simulation.")
     team_lambdas = _build_team_lambdas(db_path=config.db_path, model=model)
     simulate_world_cup(
         team_lambdas,
@@ -154,7 +160,7 @@ def run_pipeline(
         seed=config.seed,
     )
 
-    LOGGER.info("Step 7/7: exporting analytical summaries.")
+    LOGGER.info("Step 8/8: exporting analytical summaries.")
     export_analytics(db_path=config.db_path)
 
     LOGGER.info("Pipeline completed successfully.")
@@ -172,6 +178,7 @@ def _build_team_lambdas(
     """
     with duckdb.connect(str(db_path), read_only=True) as con:
         has_world_football_elo_ratings = _world_football_elo_ratings_tables_available(con)
+        has_fifa_world_ranking = _fifa_world_ranking_tables_available(con)
         world_football_elo_ratings_cte = (
             """
             world_football_elo_ratings AS (
@@ -194,6 +201,29 @@ def _build_team_lambdas(
             if has_world_football_elo_ratings
             else ""
         )
+        fifa_world_ranking_cte = (
+            """
+            fifa_world_ranking AS (
+                SELECT team_id, fifa_world_ranking_points, fifa_world_ranking_rank
+                FROM (
+                    SELECT
+                        a.team_alias AS team_id,
+                        r.ranking_points AS fifa_world_ranking_points,
+                        CAST(r.fifa_rank AS DOUBLE) AS fifa_world_ranking_rank,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY a.team_alias_key
+                            ORDER BY r.ranking_date DESC, r.fifa_rank ASC
+                        ) AS rn
+                    FROM d_fifa_world_ranking_team_aliases AS a
+                    INNER JOIN d_fifa_world_ranking AS r
+                        ON r.fifa_country_code = a.fifa_country_code
+                ) AS ranked_fifa_world_ranking
+                WHERE rn = 1
+            ),
+            """
+            if has_fifa_world_ranking
+            else ""
+        )
         world_football_elo_ratings_select = (
             "COALESCE(ee.world_football_elo_ratings_now, "
             "le.world_cup_probability_elo_now, 1500.0) AS world_football_elo_ratings_now"
@@ -211,6 +241,27 @@ def _build_team_lambdas(
                     = regexp_replace(lower(t.team_id), '[^a-z0-9]+', '', 'g')
             """
             if has_world_football_elo_ratings
+            else ""
+        )
+        fifa_world_ranking_points_select = (
+            "COALESCE(fr.fifa_world_ranking_points, le.world_cup_probability_elo_now, 1500.0) "
+            "AS fifa_world_ranking_points"
+            if has_fifa_world_ranking
+            else "COALESCE(le.world_cup_probability_elo_now, 1500.0) AS fifa_world_ranking_points"
+        )
+        fifa_world_ranking_rank_select = (
+            "COALESCE(fr.fifa_world_ranking_rank, 0.0) AS fifa_world_ranking_rank"
+            if has_fifa_world_ranking
+            else "0.0 AS fifa_world_ranking_rank"
+        )
+        fifa_world_ranking_join = (
+            """
+            LEFT JOIN fifa_world_ranking AS fr
+                ON lower(fr.team_id) = lower(t.team_id)
+                OR regexp_replace(lower(fr.team_id), '[^a-z0-9]+', '', 'g')
+                    = regexp_replace(lower(t.team_id), '[^a-z0-9]+', '', 'g')
+            """
+            if has_fifa_world_ranking
             else ""
         )
         query = f"""
@@ -260,6 +311,7 @@ def _build_team_lambdas(
                 WHERE rn = 1
             ),
             {world_football_elo_ratings_cte}
+            {fifa_world_ranking_cte}
             recent_form AS (
                 SELECT
                     team_id,
@@ -297,12 +349,15 @@ def _build_team_lambdas(
                 t.team_name,
                 COALESCE(le.world_cup_probability_elo_now, 1500.0) AS world_cup_probability_elo_now,
                 {world_football_elo_ratings_select},
+                {fifa_world_ranking_points_select},
+                {fifa_world_ranking_rank_select},
                 COALESCE(t.market_value_eur, 0.0) AS market_value_eur,
                 COALESCE(lf.recent_form, 0.0) AS recent_form
             FROM d_teams AS t
             LEFT JOIN latest_world_cup_probability_elo AS le
                 ON le.team_id = t.team_id
             {world_football_elo_ratings_join}
+            {fifa_world_ranking_join}
             LEFT JOIN latest_form AS lf
                 ON lf.team_id = t.team_id
             ORDER BY world_cup_probability_elo_now DESC, market_value_eur DESC, team_name ASC
@@ -319,6 +374,8 @@ def _build_team_lambdas(
         [
             pl.mean("world_cup_probability_elo_now").alias("world_cup_probability_elo_mean"),
             pl.mean("world_football_elo_ratings_now").alias("world_football_elo_ratings_mean"),
+            pl.mean("fifa_world_ranking_points").alias("fifa_world_ranking_points_mean"),
+            pl.mean("fifa_world_ranking_rank").alias("fifa_world_ranking_rank_mean"),
             pl.mean("market_value_eur").alias("market_value_mean"),
             pl.mean("recent_form").alias("recent_form_mean"),
         ]
@@ -326,6 +383,8 @@ def _build_team_lambdas(
     (
         world_cup_probability_elo_mean,
         world_football_elo_ratings_mean,
+        fifa_world_ranking_points_mean,
+        fifa_world_ranking_rank_mean,
         market_value_mean,
         recent_form_mean,
     ) = map(float, league_means)
@@ -338,6 +397,12 @@ def _build_team_lambdas(
             (
                 pl.col("world_football_elo_ratings_now") - pl.lit(world_football_elo_ratings_mean)
             ).alias("world_football_elo_ratings_diff"),
+            (pl.col("fifa_world_ranking_points") - pl.lit(fifa_world_ranking_points_mean)).alias(
+                "fifa_world_ranking_points_diff"
+            ),
+            (pl.lit(fifa_world_ranking_rank_mean) - pl.col("fifa_world_ranking_rank")).alias(
+                "fifa_world_ranking_rank_diff"
+            ),
             (pl.col("market_value_eur") - pl.lit(market_value_mean)).alias("market_value_diff"),
             (pl.col("recent_form") - pl.lit(recent_form_mean)).alias("recent_form_diff"),
         ]
@@ -379,6 +444,22 @@ def _seed_bracket(team_frame: pl.DataFrame) -> pl.DataFrame:
 
 def _world_football_elo_ratings_tables_available(con: duckdb.DuckDBPyConnection) -> bool:
     tables = ("d_world_football_elo_ratings", "d_world_football_elo_team_aliases")
+    return all(
+        con.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_name = ?
+            """,
+            [table],
+        ).fetchone()[0]
+        > 0
+        for table in tables
+    )
+
+
+def _fifa_world_ranking_tables_available(con: duckdb.DuckDBPyConnection) -> bool:
+    tables = ("d_fifa_world_ranking", "d_fifa_world_ranking_team_aliases")
     return all(
         con.execute(
             """
