@@ -71,11 +71,45 @@ indent-style = "space"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 
+[tool.sqlfluff.core]
+dialect = "duckdb"
+templater = "jinja"
+sql_file_exts = ".sql,.sql.j2"
+max_line_length = 100
+exclude_rules = "ST06"
+
+[tool.sqlfluff.templater.jinja.context]
+squad_attributes_ctes = ""
+world_football_elo_ratings_cte = ""
+fifa_world_ranking_cte = ""
+home_world_football_elo_ratings_expr = "e.home_rating_before"
+away_world_football_elo_ratings_expr = "e.away_rating_before"
+home_fifa_points_expr = "e.home_rating_before"
+away_fifa_points_expr = "e.away_rating_before"
+home_fifa_rank_expr = "0.0"
+away_fifa_rank_expr = "0.0"
+home_squad_attribute_selects = "0.0 AS home_avg_overall,"
+away_squad_attribute_selects = "0.0 AS away_avg_overall,"
+world_football_elo_ratings_joins = ""
+fifa_world_ranking_joins = ""
+squad_attribute_joins = ""
+current_world_cup_exclusion = "TRUE"
+match_history_exclusion = "TRUE"
+elo_history_exclusion = "TRUE"
+world_football_elo_ratings_select = "COALESCE(le.world_cup_probability_elo_now, 1500.0) AS world_football_elo_ratings_now"
+fifa_world_ranking_points_select = "COALESCE(le.world_cup_probability_elo_now, 1500.0) AS fifa_world_ranking_points"
+fifa_world_ranking_rank_select = "0.0 AS fifa_world_ranking_rank"
+squad_attributes_select = "0.0 AS avg_overall,"
+world_football_elo_ratings_join = ""
+fifa_world_ranking_join = ""
+squad_attributes_join = ""
+
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.0",
     "pytest>=9.1.1",
     "ruff>=0.15.18",
+    "sqlfluff>=3.3.1",
 ]
 
 
