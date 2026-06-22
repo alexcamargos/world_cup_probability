@@ -562,6 +562,8 @@ def _build_team_level_features(
             pl.col("match_date"),
             pl.col("competition"),
             pl.col("is_current_world_cup"),
+            pl.col("target").alias("home_goals"),
+            pl.col("target_away").alias("away_goals"),
             *feature_columns,
         ]
 
@@ -706,9 +708,7 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
             pl.col("home_fifa_world_ranking_points").alias("opponent_fifa_world_ranking_points"),
             pl.col("away_fifa_world_ranking_rank").alias("team_fifa_world_ranking_rank"),
             pl.col("home_fifa_world_ranking_rank").alias("opponent_fifa_world_ranking_rank"),
-            pl.col("away_prior_world_cup_appearances").alias(
-                "team_prior_world_cup_appearances"
-            ),
+            pl.col("away_prior_world_cup_appearances").alias("team_prior_world_cup_appearances"),
             pl.col("home_prior_world_cup_appearances").alias(
                 "opponent_prior_world_cup_appearances"
             ),
