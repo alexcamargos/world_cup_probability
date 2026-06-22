@@ -43,17 +43,20 @@ Ordem recomendada:
    - `uv run features`
 9. Treinar o modelo Poisson e gerar SHAP:
    - `uv run train-model`
-10. Rodar a simulação Monte Carlo:
+10. Treinar o modelo categórico de resultado (vitória do time 1, empate,
+    vitória do time 2) e comparar com baseline aleatório uniforme:
+   - `uv run train-outcome-model`
+11. Rodar a simulação Monte Carlo:
    - `uv run simulate`
    - Exemplo reproduzível e menor para validação local:
      `uv run simulate --iterations 1000 --batch-size 250 --seed 42`
    - Para exportar os CSVs analíticos na mesma execução:
      `uv run simulate --iterations 100000 --batch-size 2500 --export-analytics`
-11. Gerar as análises e CSVs:
+12. Gerar as análises e CSVs:
    - `uv run analytics`
-12. Orquestrar tudo em sequência:
+13. Orquestrar tudo em sequência:
    - `uv run pipeline --iterations 100000 --batch-size 2500`
-13. Abrir a interface web Streamlit:
+14. Abrir a interface web Streamlit:
    - `uv run dashboard`
    - Alternativamente: `uv run streamlit run src/app.py`
 
@@ -155,6 +158,8 @@ Manifesto Transfermarkt esperado:
 
 - `data/warehouse/world_cup.duckdb`: fonte analítica local
 - `models/xgb_poisson_model.json`: modelo treinado
+- `models/xgb_outcome_model.json`: modelo categórico treinado para V/E/D
+- `models/xgb_outcome_metrics.json`: validação temporal contra baseline aleatório
 - `reports/figures/xgb_poisson_beeswarm.png`: interpretação SHAP
 - `reports/analytics/*.csv`: resumos analíticos da simulação
 
