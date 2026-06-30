@@ -490,6 +490,9 @@ def _build_team_level_features(
     include_metadata: bool = False,
 ) -> pl.DataFrame:
     """Derive recent-form features and collapse the dataset back to match level."""
+    if match_df.height == 0:
+        return _empty_feature_frame(include_metadata=include_metadata)
+
     match_df = _ensure_prior_world_cup_columns(match_df)
     match_df = _ensure_prior_world_cup_discipline_columns(match_df)
     home_team = _build_side_frame(match_df, side="home")
@@ -570,6 +573,44 @@ def _build_team_level_features(
     feature_df = matched.select(feature_columns)
 
     return feature_df
+
+
+def _empty_feature_frame(*, include_metadata: bool) -> pl.DataFrame:
+    """Return an empty frame with the public feature schema."""
+    schema: dict[str, pl.DataType] = {}
+    if include_metadata:
+        schema.update(
+            {
+                "match_id": pl.Utf8,
+                "match_date": pl.Date,
+                "competition": pl.Utf8,
+                "is_current_world_cup": pl.Boolean,
+                "home_goals": pl.Float64,
+                "away_goals": pl.Float64,
+            }
+        )
+    schema.update(
+        {
+            "world_cup_probability_elo_diff": pl.Float64,
+            "world_football_elo_ratings_diff": pl.Float64,
+            "fifa_world_ranking_points_diff": pl.Float64,
+            "fifa_world_ranking_rank_diff": pl.Float64,
+            "prior_world_cup_appearances_diff": pl.Float64,
+            "prior_world_cup_points_per_match_diff": pl.Float64,
+            "prior_world_cup_goal_diff_per_match_diff": pl.Float64,
+            "prior_world_cup_yellow_cards_per_match_diff": pl.Float64,
+            "prior_world_cup_sending_offs_per_match_diff": pl.Float64,
+            "prior_world_cup_fair_play_penalty_per_match_diff": pl.Float64,
+            "market_value_diff": pl.Float64,
+            "avg_overall_diff": pl.Float64,
+            "avg_pace_diff": pl.Float64,
+            "avg_stamina_diff": pl.Float64,
+            "squad_depth_proxy": pl.Float64,
+            "recent_form_diff": pl.Float64,
+            "target": pl.Float64,
+        }
+    )
+    return pl.DataFrame(schema=schema)
 
 
 def _ensure_prior_world_cup_columns(match_df: pl.DataFrame) -> pl.DataFrame:
