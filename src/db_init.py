@@ -452,9 +452,48 @@ def _load_raw_file_into_table(
         )
 
     select_list = _build_select_list(column_lookup, loader, raw_file)
-    con.execute(f"DELETE FROM {loader.table_name} WHERE source_file = ?", [str(raw_file)])
+    _delete_existing_source_rows(con, loader, raw_file)
     con.execute(_insert_sql(loader, select_list, source_sql))
     LOGGER.info("Loaded %s into %s.", raw_file, loader.table_name)
+
+
+def _delete_existing_source_rows(
+    con: duckdb.DuckDBPyConnection,
+    loader: TableLoader,
+    raw_file: Path,
+) -> None:
+    """Remove reloadable rows without violating warehouse foreign keys."""
+    if loader.table_name != "d_teams":
+        con.execute(f"DELETE FROM {loader.table_name} WHERE source_file = ?", [str(raw_file)])
+        return
+
+    con.execute(
+        """
+        DELETE FROM d_teams AS t
+        WHERE t.source_file = ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM f_matches AS m
+              WHERE m.home_team_id = t.team_id OR m.away_team_id = t.team_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM f_match_stats AS s
+              WHERE s.team_id = t.team_id OR s.opponent_team_id = t.team_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM d_squad_attributes AS a
+              WHERE a.team_id = t.team_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM d_squads AS q
+              WHERE q.team_id = t.team_id
+          )
+        """,
+        [str(raw_file)],
+    )
 
 
 def _read_source_columns(con: duckdb.DuckDBPyConnection, raw_file: Path) -> list[str]:
@@ -468,7 +507,11 @@ def _source_sql(raw_file: Path) -> str:
     if raw_file.suffix.lower() == ".parquet":
         return f"read_parquet({file_path})"
     if raw_file.suffix.lower() == ".csv":
-        return f"read_csv_auto({file_path}, header=true)"
+        return (
+            "read_csv_auto("
+            f"{file_path}, header=true, nullstr=['', 'NA', 'N/A', 'NULL'], sample_size=-1"
+            ")"
+        )
     raise ValueError(f"Unsupported raw file extension: {raw_file.suffix}")
 
 
