@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import duckdb
@@ -9,7 +10,8 @@ from src.db_init import initialize_database
 from src.elo_engine import _competition_weight, _goal_margin_multiplier, build_elo_history
 
 
-def test_build_elo_history_upserts_existing_match(tmp_path: Path) -> None:
+def test_build_elo_history_upserts_existing_match(tmp_path: Path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="src.elo_engine")
     db_path = tmp_path / "warehouse" / "world_cup.duckdb"
     initialize_database(db_path=db_path, load_raw_files=False)
 
@@ -118,6 +120,7 @@ def test_build_elo_history_upserts_existing_match(tmp_path: Path) -> None:
     assert row == (1, 1500.0, 1500.0, 1.0, 0.0, True)
     assert world_cup_rows == 0
     assert stale_rows == 0
+    assert "Elo progress: match 1/1 processed (100.0% complete)." in caplog.text
 
 
 def test_dynamic_elo_stores_margin_and_experience_adjusted_k(tmp_path: Path) -> None:
