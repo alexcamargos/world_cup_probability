@@ -55,8 +55,27 @@ RAW_FEATURE_DEFAULTS: dict[str, float] = {
     "avg_overall": 0.0,
     "avg_pace": 0.0,
     "avg_stamina": 0.0,
+    "avg_goalkeeper_overall": 0.0,
+    "avg_defense_overall": 0.0,
+    "avg_midfield_overall": 0.0,
+    "avg_attack_overall": 0.0,
     "squad_depth_proxy": 0.0,
     "recent_form": 0.0,
+    "recent_xg_for": 0.0,
+    "recent_xg_against": 0.0,
+    "recent_possession_pct": 0.0,
+    "recent_shots_for": 0.0,
+    "recent_shots_against": 0.0,
+    "recent_shots_on_target_for": 0.0,
+    "recent_shots_on_target_against": 0.0,
+    "recent_corners_for": 0.0,
+    "recent_corners_against": 0.0,
+    "recent_yellow_cards": 0.0,
+    "recent_red_cards": 0.0,
+    "opponent_adjusted_recent_form": 0.0,
+    "recent_official_form": 0.0,
+    "recent_friendly_form": 0.0,
+    "is_friendly_match": 0.0,
 }
 
 
@@ -122,6 +141,7 @@ def build_current_world_cup_team_features(db_path: Path = DB_PATH) -> dict[str, 
         _load_team_market_values(con, feature_values_by_key)
         _load_latest_world_cup_probability_elo(con, feature_values_by_key)
         _load_recent_form(con, feature_values_by_key)
+        _load_recent_match_stats(con, feature_values_by_key)
         _load_world_football_elo_ratings(con, feature_values_by_key)
         _load_fifa_world_ranking(con, feature_values_by_key)
         _load_squad_attributes(con, feature_values_by_key)
@@ -260,6 +280,8 @@ def _fixture_feature_vector(
     home_features: dict[str, float],
     away_features: dict[str, float],
 ) -> list[float]:
+    home_features = RAW_FEATURE_DEFAULTS | home_features
+    away_features = RAW_FEATURE_DEFAULTS | away_features
     values = {
         "world_cup_probability_elo_diff": (
             home_features["world_cup_probability_elo"] - away_features["world_cup_probability_elo"]
@@ -302,10 +324,66 @@ def _fixture_feature_vector(
         "avg_overall_diff": home_features["avg_overall"] - away_features["avg_overall"],
         "avg_pace_diff": home_features["avg_pace"] - away_features["avg_pace"],
         "avg_stamina_diff": home_features["avg_stamina"] - away_features["avg_stamina"],
+        "avg_goalkeeper_overall_diff": (
+            home_features["avg_goalkeeper_overall"] - away_features["avg_goalkeeper_overall"]
+        ),
+        "avg_defense_overall_diff": (
+            home_features["avg_defense_overall"] - away_features["avg_defense_overall"]
+        ),
+        "avg_midfield_overall_diff": (
+            home_features["avg_midfield_overall"] - away_features["avg_midfield_overall"]
+        ),
+        "avg_attack_overall_diff": (
+            home_features["avg_attack_overall"] - away_features["avg_attack_overall"]
+        ),
         "squad_depth_proxy": (
             home_features["squad_depth_proxy"] - away_features["squad_depth_proxy"]
         ),
         "recent_form_diff": home_features["recent_form"] - away_features["recent_form"],
+        "recent_xg_for_diff": home_features["recent_xg_for"] - away_features["recent_xg_for"],
+        "recent_xg_against_diff": (
+            home_features["recent_xg_against"] - away_features["recent_xg_against"]
+        ),
+        "recent_possession_pct_diff": (
+            home_features["recent_possession_pct"] - away_features["recent_possession_pct"]
+        ),
+        "recent_shots_for_diff": (
+            home_features["recent_shots_for"] - away_features["recent_shots_for"]
+        ),
+        "recent_shots_against_diff": (
+            home_features["recent_shots_against"] - away_features["recent_shots_against"]
+        ),
+        "recent_shots_on_target_for_diff": (
+            home_features["recent_shots_on_target_for"]
+            - away_features["recent_shots_on_target_for"]
+        ),
+        "recent_shots_on_target_against_diff": (
+            home_features["recent_shots_on_target_against"]
+            - away_features["recent_shots_on_target_against"]
+        ),
+        "recent_corners_for_diff": (
+            home_features["recent_corners_for"] - away_features["recent_corners_for"]
+        ),
+        "recent_corners_against_diff": (
+            home_features["recent_corners_against"] - away_features["recent_corners_against"]
+        ),
+        "recent_yellow_cards_diff": (
+            home_features["recent_yellow_cards"] - away_features["recent_yellow_cards"]
+        ),
+        "recent_red_cards_diff": (
+            home_features["recent_red_cards"] - away_features["recent_red_cards"]
+        ),
+        "opponent_adjusted_recent_form_diff": (
+            home_features["opponent_adjusted_recent_form"]
+            - away_features["opponent_adjusted_recent_form"]
+        ),
+        "recent_official_form_diff": (
+            home_features["recent_official_form"] - away_features["recent_official_form"]
+        ),
+        "recent_friendly_form_diff": (
+            home_features["recent_friendly_form"] - away_features["recent_friendly_form"]
+        ),
+        "is_friendly_match": home_features["is_friendly_match"],
     }
     return [float(values[column]) for column in FEATURE_COLUMNS]
 
@@ -386,6 +464,7 @@ def _load_recent_form(
             SELECT
                 match_id,
                 match_date,
+                competition,
                 home_team_id AS team_id,
                 home_team_score AS goals_for,
                 away_team_score AS goals_against
@@ -395,6 +474,7 @@ def _load_recent_form(
             SELECT
                 match_id,
                 match_date,
+                competition,
                 away_team_id AS team_id,
                 away_team_score AS goals_for,
                 home_team_score AS goals_against
@@ -419,24 +499,188 @@ def _load_recent_form(
                     ),
                     0.0
                 ) AS recent_form,
+                COALESCE(
+                    AVG(goals_for - goals_against) OVER (
+                        PARTITION BY team_id
+                        ORDER BY match_date, match_id
+                        ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+                    ),
+                    0.0
+                ) AS opponent_adjusted_recent_form,
+                COALESCE(
+                    AVG(
+                        CASE
+                            WHEN lower(coalesce(competition, '')) NOT LIKE '%friendly%'
+                             AND lower(coalesce(competition, '')) NOT LIKE '%amistoso%'
+                            THEN goals_for - goals_against
+                            ELSE NULL
+                        END
+                    ) OVER (
+                        PARTITION BY team_id
+                        ORDER BY match_date, match_id
+                        ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+                    ),
+                    0.0
+                ) AS recent_official_form,
+                COALESCE(
+                    AVG(
+                        CASE
+                            WHEN lower(coalesce(competition, '')) LIKE '%friendly%'
+                              OR lower(coalesce(competition, '')) LIKE '%amistoso%'
+                            THEN goals_for - goals_against
+                            ELSE NULL
+                        END
+                    ) OVER (
+                        PARTITION BY team_id
+                        ORDER BY match_date, match_id
+                        ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+                    ),
+                    0.0
+                ) AS recent_friendly_form,
                 ROW_NUMBER() OVER (
                     PARTITION BY team_id
                     ORDER BY match_date DESC, match_id DESC
                 ) AS rn
             FROM team_match_history
         )
-        SELECT rf.team_id, t.team_name, rf.recent_form
+        SELECT
+            rf.team_id,
+            t.team_name,
+            rf.recent_form,
+            rf.opponent_adjusted_recent_form,
+            rf.recent_official_form,
+            rf.recent_friendly_form
         FROM recent_form AS rf
         LEFT JOIN d_teams AS t
             ON t.team_id = rf.team_id
         WHERE rf.rn = 1
         """,
     ).fetchall()
-    for team_id, team_name, recent_form in rows:
+    for (
+        team_id,
+        team_name,
+        recent_form,
+        opponent_adjusted_recent_form,
+        recent_official_form,
+        recent_friendly_form,
+    ) in rows:
         _add_feature_values(
             feature_values_by_key,
             (team_id, team_name),
-            {"recent_form": float(recent_form or 0.0)},
+            {
+                "recent_form": float(recent_form or 0.0),
+                "opponent_adjusted_recent_form": float(opponent_adjusted_recent_form or 0.0),
+                "recent_official_form": float(recent_official_form or 0.0),
+                "recent_friendly_form": float(recent_friendly_form or 0.0),
+            },
+        )
+
+
+def _load_recent_match_stats(
+    con: duckdb.DuckDBPyConnection,
+    feature_values_by_key: dict[str, dict[str, list[float]]],
+) -> None:
+    if not _table_exists(con, "f_match_stats"):
+        return
+    columns = _table_columns(con, "f_match_stats")
+
+    def stat_expr(alias: str, column: str) -> str:
+        if column in columns:
+            return f"{alias}.{column}"
+        return "NULL::DOUBLE"
+
+    rows = con.execute(
+        f"""
+        WITH stat_history AS (
+            SELECT
+                s.match_id,
+                s.match_date,
+                s.team_id,
+                {stat_expr("s", "xg")} AS xg_for,
+                {stat_expr("o", "xg")} AS xg_against,
+                {stat_expr("s", "possession_pct")} AS possession_pct,
+                {stat_expr("s", "shots")} AS shots_for,
+                {stat_expr("o", "shots")} AS shots_against,
+                {stat_expr("s", "shots_on_target")} AS shots_on_target_for,
+                {stat_expr("o", "shots_on_target")} AS shots_on_target_against,
+                {stat_expr("s", "corners")} AS corners_for,
+                {stat_expr("o", "corners")} AS corners_against,
+                {stat_expr("s", "yellow_cards")} AS yellow_cards,
+                {stat_expr("s", "red_cards")} AS red_cards
+            FROM f_match_stats AS s
+            LEFT JOIN f_match_stats AS o
+                ON o.source = s.source
+               AND o.match_id = s.match_id
+               AND lower(o.team_id) = lower(s.opponent_team_id)
+            WHERE s.source = 'fbref'
+        ),
+        rolling_stats AS (
+            SELECT
+                team_id,
+                COALESCE(AVG(xg_for) OVER stat_window, 0.0) AS recent_xg_for,
+                COALESCE(AVG(xg_against) OVER stat_window, 0.0) AS recent_xg_against,
+                COALESCE(AVG(possession_pct) OVER stat_window, 0.0)
+                    AS recent_possession_pct,
+                COALESCE(AVG(shots_for) OVER stat_window, 0.0) AS recent_shots_for,
+                COALESCE(AVG(shots_against) OVER stat_window, 0.0) AS recent_shots_against,
+                COALESCE(AVG(shots_on_target_for) OVER stat_window, 0.0)
+                    AS recent_shots_on_target_for,
+                COALESCE(AVG(shots_on_target_against) OVER stat_window, 0.0)
+                    AS recent_shots_on_target_against,
+                COALESCE(AVG(corners_for) OVER stat_window, 0.0) AS recent_corners_for,
+                COALESCE(AVG(corners_against) OVER stat_window, 0.0)
+                    AS recent_corners_against,
+                COALESCE(AVG(yellow_cards) OVER stat_window, 0.0) AS recent_yellow_cards,
+                COALESCE(AVG(red_cards) OVER stat_window, 0.0) AS recent_red_cards,
+                ROW_NUMBER() OVER (
+                    PARTITION BY team_id
+                    ORDER BY match_date DESC, match_id DESC
+                ) AS rn
+            FROM stat_history
+            WINDOW stat_window AS (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            )
+        )
+        SELECT
+            rs.team_id,
+            t.team_name,
+            rs.recent_xg_for,
+            rs.recent_xg_against,
+            rs.recent_possession_pct,
+            rs.recent_shots_for,
+            rs.recent_shots_against,
+            rs.recent_shots_on_target_for,
+            rs.recent_shots_on_target_against,
+            rs.recent_corners_for,
+            rs.recent_corners_against,
+            rs.recent_yellow_cards,
+            rs.recent_red_cards
+        FROM rolling_stats AS rs
+        LEFT JOIN d_teams AS t
+            ON t.team_id = rs.team_id
+        WHERE rs.rn = 1
+        """,
+    ).fetchall()
+    for row in rows:
+        team_id, team_name, *values = row
+        _add_feature_values(
+            feature_values_by_key,
+            (team_id, team_name),
+            {
+                "recent_xg_for": float(values[0] or 0.0),
+                "recent_xg_against": float(values[1] or 0.0),
+                "recent_possession_pct": float(values[2] or 0.0),
+                "recent_shots_for": float(values[3] or 0.0),
+                "recent_shots_against": float(values[4] or 0.0),
+                "recent_shots_on_target_for": float(values[5] or 0.0),
+                "recent_shots_on_target_against": float(values[6] or 0.0),
+                "recent_corners_for": float(values[7] or 0.0),
+                "recent_corners_against": float(values[8] or 0.0),
+                "recent_yellow_cards": float(values[9] or 0.0),
+                "recent_red_cards": float(values[10] or 0.0),
+            },
         )
 
 
@@ -504,6 +748,10 @@ def _load_squad_attributes(
             avg_overall,
             avg_pace,
             avg_stamina,
+            COALESCE(avg_goalkeeper_overall, avg_overall) AS avg_goalkeeper_overall,
+            COALESCE(avg_defense_overall, avg_overall) AS avg_defense_overall,
+            COALESCE(avg_midfield_overall, avg_overall) AS avg_midfield_overall,
+            COALESCE(avg_attack_overall, avg_overall) AS avg_attack_overall,
             CAST(sampled_player_count AS DOUBLE) AS squad_depth_proxy
         FROM (
             SELECT
@@ -511,6 +759,10 @@ def _load_squad_attributes(
                 avg_overall,
                 avg_pace,
                 avg_stamina,
+                avg_goalkeeper_overall,
+                avg_defense_overall,
+                avg_midfield_overall,
+                avg_attack_overall,
                 sampled_player_count,
                 ROW_NUMBER() OVER (
                     PARTITION BY team_id
@@ -521,7 +773,17 @@ def _load_squad_attributes(
         WHERE rn = 1
         """,
     ).fetchall()
-    for team_id, avg_overall, avg_pace, avg_stamina, squad_depth_proxy in rows:
+    for (
+        team_id,
+        avg_overall,
+        avg_pace,
+        avg_stamina,
+        avg_goalkeeper_overall,
+        avg_defense_overall,
+        avg_midfield_overall,
+        avg_attack_overall,
+        squad_depth_proxy,
+    ) in rows:
         _add_feature_values(
             feature_values_by_key,
             (team_id,),
@@ -529,6 +791,10 @@ def _load_squad_attributes(
                 "avg_overall": float(avg_overall or 0.0),
                 "avg_pace": float(avg_pace or 0.0),
                 "avg_stamina": float(avg_stamina or 0.0),
+                "avg_goalkeeper_overall": float(avg_goalkeeper_overall or avg_overall or 0.0),
+                "avg_defense_overall": float(avg_defense_overall or avg_overall or 0.0),
+                "avg_midfield_overall": float(avg_midfield_overall or avg_overall or 0.0),
+                "avg_attack_overall": float(avg_attack_overall or avg_overall or 0.0),
                 "squad_depth_proxy": float(squad_depth_proxy or 0.0),
             },
         )
@@ -681,6 +947,13 @@ def _table_exists(con: duckdb.DuckDBPyConnection, table_name: str) -> bool:
         ).fetchone()[0]
         > 0
     )
+
+
+def _table_columns(con: duckdb.DuckDBPyConnection, table_name: str) -> set[str]:
+    if not _table_exists(con, table_name):
+        return set()
+    rows = con.execute(f"DESCRIBE {table_name}").fetchall()
+    return {str(row[0]).casefold() for row in rows}
 
 
 def _official_team_lookup_keys(code: str, official_name: str) -> tuple[str, ...]:
