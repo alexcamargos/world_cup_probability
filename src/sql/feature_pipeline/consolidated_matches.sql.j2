@@ -11,6 +11,8 @@ SELECT
     m.away_team_score,
     m.neutral_site,
     {{ current_world_cup_flag }} AS is_current_world_cup,
+    {{ home_match_stats_selects }}
+    {{ away_match_stats_selects }}
     e.home_rating_before AS home_world_cup_probability_elo_before,
     e.away_rating_before AS away_world_cup_probability_elo_before,
     {{ home_world_football_elo_ratings_expr }} AS home_world_football_elo_ratings,
@@ -51,6 +53,7 @@ INNER JOIN f_elo_history AS e
 {{ world_cup_prior_history_joins }}
 {{ world_cup_prior_discipline_joins }}
 {{ squad_attribute_joins }}
+{{ match_stats_joins }}
 LEFT JOIN d_teams AS ht
     ON m.home_team_id = ht.team_id
 LEFT JOIN d_teams AS awt
