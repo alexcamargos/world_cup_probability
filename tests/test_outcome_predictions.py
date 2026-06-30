@@ -6,6 +6,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from src.model import FEATURE_COLUMNS
 from src.outcome_predictions import (
     OutcomePredictionRow,
     _fixture_feature_vector,
@@ -56,7 +57,8 @@ def test_fixture_feature_vector_uses_training_feature_order_and_rank_direction()
     assert vector[0] == 100.0
     assert vector[3] == 10.0
     assert vector[10] == 500.0
-    assert vector[-1] == pytest.approx(0.75)
+    assert vector[FEATURE_COLUMNS.index("recent_form_diff")] == pytest.approx(0.75)
+    assert vector[FEATURE_COLUMNS.index("is_friendly_match")] == pytest.approx(0.0)
 
 
 def test_write_outcome_predictions_replaces_existing_rows(tmp_path: Path) -> None:
