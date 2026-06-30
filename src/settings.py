@@ -27,6 +27,7 @@ DEFAULT_RAW_DIR = RAW_DIR
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_INGESTION_USER_AGENT = "world-cup-probability-ingestion/0.1"
 DEFAULT_SOURCE_USER_AGENT = "world-cup-probability/0.1 (+https://localhost)"
+DEFAULT_WORLD_CUP_RESULTS_CACHE = RAW_DIR / "fifa" / "world_cup_2026_results.json"
 
 DEFAULT_ITERATIONS = 100_000
 DEFAULT_BATCH_SIZE = 2_500
