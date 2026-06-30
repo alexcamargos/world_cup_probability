@@ -1,20 +1,28 @@
 WITH team_match_history AS (
     SELECT
-        match_id,
-        match_date,
-        home_team_id AS team_id,
-        home_team_score AS goals_for,
-        away_team_score AS goals_against
+        f_matches.match_id,
+        f_matches.match_date,
+        f_matches.competition,
+        f_matches.home_team_id AS team_id,
+        f_matches.away_team_id AS opponent_team_id,
+        f_matches.home_team_score AS goals_for,
+        f_matches.away_team_score AS goals_against,
+        {{ home_match_stats_selects }}
     FROM f_matches
+    {{ home_match_stats_joins }}
     WHERE {{ match_history_exclusion }}
     UNION ALL
     SELECT
-        match_id,
-        match_date,
-        away_team_id AS team_id,
-        away_team_score AS goals_for,
-        home_team_score AS goals_against
+        f_matches.match_id,
+        f_matches.match_date,
+        f_matches.competition,
+        f_matches.away_team_id AS team_id,
+        f_matches.home_team_id AS opponent_team_id,
+        f_matches.away_team_score AS goals_for,
+        f_matches.home_team_score AS goals_against,
+        {{ away_match_stats_selects }}
     FROM f_matches
+    {{ away_match_stats_joins }}
     WHERE {{ match_history_exclusion }}
 ),
 
@@ -78,6 +86,132 @@ recent_form AS (
             ),
             0.0
         ) AS goals_against_last5,
+        COALESCE(
+            AVG(xg_for) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_xg_for,
+        COALESCE(
+            AVG(xg_against) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_xg_against,
+        COALESCE(
+            AVG(possession_pct) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_possession_pct,
+        COALESCE(
+            AVG(shots_for) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_shots_for,
+        COALESCE(
+            AVG(shots_against) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_shots_against,
+        COALESCE(
+            AVG(shots_on_target_for) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_shots_on_target_for,
+        COALESCE(
+            AVG(shots_on_target_against) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_shots_on_target_against,
+        COALESCE(
+            AVG(corners_for) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_corners_for,
+        COALESCE(
+            AVG(corners_against) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_corners_against,
+        COALESCE(
+            AVG(yellow_cards) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_yellow_cards,
+        COALESCE(
+            AVG(red_cards) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_red_cards,
+        COALESCE(
+            AVG(goals_for - goals_against) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS opponent_adjusted_recent_form,
+        COALESCE(
+            AVG(
+                CASE
+                    WHEN lower(coalesce(competition, '')) NOT LIKE '%friendly%'
+                     AND lower(coalesce(competition, '')) NOT LIKE '%amistoso%'
+                    THEN goals_for - goals_against
+                    ELSE NULL
+                END
+            ) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_official_form,
+        COALESCE(
+            AVG(
+                CASE
+                    WHEN lower(coalesce(competition, '')) LIKE '%friendly%'
+                      OR lower(coalesce(competition, '')) LIKE '%amistoso%'
+                    THEN goals_for - goals_against
+                    ELSE NULL
+                END
+            ) OVER (
+                PARTITION BY team_id
+                ORDER BY match_date, match_id
+                ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
+            ),
+            0.0
+        ) AS recent_friendly_form,
         ROW_NUMBER() OVER (
             PARTITION BY team_id
             ORDER BY match_date DESC, match_id DESC
@@ -88,7 +222,21 @@ recent_form AS (
 latest_form AS (
     SELECT
         team_id,
-        goals_for_last5 - goals_against_last5 AS recent_form
+        goals_for_last5 - goals_against_last5 AS recent_form,
+        recent_xg_for,
+        recent_xg_against,
+        recent_possession_pct,
+        recent_shots_for,
+        recent_shots_against,
+        recent_shots_on_target_for,
+        recent_shots_on_target_against,
+        recent_corners_for,
+        recent_corners_against,
+        recent_yellow_cards,
+        recent_red_cards,
+        opponent_adjusted_recent_form,
+        recent_official_form,
+        recent_friendly_form
     FROM recent_form
     WHERE rn = 1
 )
@@ -103,7 +251,22 @@ SELECT
     {{ world_cup_prior_discipline_selects }}
     COALESCE(t.market_value_eur, 0.0) AS market_value_eur,
     {{ squad_attributes_select }}
-    COALESCE(lf.recent_form, 0.0) AS recent_form
+    COALESCE(lf.recent_form, 0.0) AS recent_form,
+    COALESCE(lf.recent_xg_for, 0.0) AS recent_xg_for,
+    COALESCE(lf.recent_xg_against, 0.0) AS recent_xg_against,
+    COALESCE(lf.recent_possession_pct, 0.0) AS recent_possession_pct,
+    COALESCE(lf.recent_shots_for, 0.0) AS recent_shots_for,
+    COALESCE(lf.recent_shots_against, 0.0) AS recent_shots_against,
+    COALESCE(lf.recent_shots_on_target_for, 0.0) AS recent_shots_on_target_for,
+    COALESCE(lf.recent_shots_on_target_against, 0.0) AS recent_shots_on_target_against,
+    COALESCE(lf.recent_corners_for, 0.0) AS recent_corners_for,
+    COALESCE(lf.recent_corners_against, 0.0) AS recent_corners_against,
+    COALESCE(lf.recent_yellow_cards, 0.0) AS recent_yellow_cards,
+    COALESCE(lf.recent_red_cards, 0.0) AS recent_red_cards,
+    COALESCE(lf.opponent_adjusted_recent_form, 0.0) AS opponent_adjusted_recent_form,
+    COALESCE(lf.recent_official_form, 0.0) AS recent_official_form,
+    COALESCE(lf.recent_friendly_form, 0.0) AS recent_friendly_form,
+    0.0 AS is_friendly_match
 FROM d_teams AS t
 LEFT JOIN latest_world_cup_probability_elo AS le
     ON t.team_id = le.team_id
