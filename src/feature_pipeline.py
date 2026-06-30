@@ -24,6 +24,38 @@ except ImportError:  # pragma: no cover - supports direct script execution.
 
 LOGGER = logging.getLogger(__name__)
 
+SQUAD_POSITION_FEATURES: tuple[str, ...] = (
+    "avg_goalkeeper_overall",
+    "avg_defense_overall",
+    "avg_midfield_overall",
+    "avg_attack_overall",
+)
+MATCH_STAT_FEATURES: tuple[str, ...] = (
+    "xg",
+    "possession_pct",
+    "shots",
+    "shots_on_target",
+    "corners",
+    "yellow_cards",
+    "red_cards",
+)
+ROLLING_FEATURE_DEFAULTS: dict[str, float] = {
+    "recent_xg_for": 0.0,
+    "recent_xg_against": 0.0,
+    "recent_possession_pct": 0.0,
+    "recent_shots_for": 0.0,
+    "recent_shots_against": 0.0,
+    "recent_shots_on_target_for": 0.0,
+    "recent_shots_on_target_against": 0.0,
+    "recent_corners_for": 0.0,
+    "recent_corners_against": 0.0,
+    "recent_yellow_cards": 0.0,
+    "recent_red_cards": 0.0,
+    "opponent_adjusted_recent_form": 0.0,
+    "recent_official_form": 0.0,
+    "recent_friendly_form": 0.0,
+}
+
 
 def build_feature_frame(
     db_path: Path = DB_PATH,
@@ -105,6 +137,8 @@ def _load_consolidated_matches(
     has_world_football_elo_ratings = _world_football_elo_ratings_tables_available(con)
     has_fifa_world_ranking = _fifa_world_ranking_tables_available(con)
     has_squad_attributes = _squad_attributes_table_available(con)
+    has_match_stats = _match_stats_table_available(con)
+    match_stats_columns = _table_columns(con, "f_match_stats") if has_match_stats else set()
     has_world_cup_prior_history = _world_cup_prior_history_table_available(con)
     has_world_cup_prior_discipline = _world_cup_prior_discipline_table_available(con)
     home_team_key = "regexp_replace(lower(m.home_team_id), '[^a-z0-9]+', '', 'g')"
@@ -117,6 +151,10 @@ def _load_consolidated_matches(
                 avg_overall,
                 avg_pace,
                 avg_stamina,
+                avg_goalkeeper_overall,
+                avg_defense_overall,
+                avg_midfield_overall,
+                avg_attack_overall,
                 CAST(sampled_player_count AS DOUBLE) AS squad_depth_proxy
             FROM (
                 SELECT
@@ -124,6 +162,10 @@ def _load_consolidated_matches(
                     avg_overall,
                     avg_pace,
                     avg_stamina,
+                    COALESCE(avg_goalkeeper_overall, avg_overall) AS avg_goalkeeper_overall,
+                    COALESCE(avg_defense_overall, avg_overall) AS avg_defense_overall,
+                    COALESCE(avg_midfield_overall, avg_overall) AS avg_midfield_overall,
+                    COALESCE(avg_attack_overall, avg_overall) AS avg_attack_overall,
                     sampled_player_count,
                     ROW_NUMBER() OVER (
                         PARTITION BY team_id
@@ -138,6 +180,10 @@ def _load_consolidated_matches(
                 COALESCE(AVG(avg_overall), 0.0) AS avg_overall,
                 COALESCE(AVG(avg_pace), 0.0) AS avg_pace,
                 COALESCE(AVG(avg_stamina), 0.0) AS avg_stamina,
+                COALESCE(AVG(avg_goalkeeper_overall), 0.0) AS avg_goalkeeper_overall,
+                COALESCE(AVG(avg_defense_overall), 0.0) AS avg_defense_overall,
+                COALESCE(AVG(avg_midfield_overall), 0.0) AS avg_midfield_overall,
+                COALESCE(AVG(avg_attack_overall), 0.0) AS avg_attack_overall,
                 COALESCE(AVG(squad_depth_proxy), 0.0) AS squad_depth_proxy
             FROM latest_squad_attributes
         )
@@ -150,6 +196,14 @@ def _load_consolidated_matches(
             COALESCE(hsa.avg_overall, sad.avg_overall) AS home_avg_overall,
             COALESCE(hsa.avg_pace, sad.avg_pace) AS home_avg_pace,
             COALESCE(hsa.avg_stamina, sad.avg_stamina) AS home_avg_stamina,
+            COALESCE(hsa.avg_goalkeeper_overall, sad.avg_goalkeeper_overall)
+                AS home_avg_goalkeeper_overall,
+            COALESCE(hsa.avg_defense_overall, sad.avg_defense_overall)
+                AS home_avg_defense_overall,
+            COALESCE(hsa.avg_midfield_overall, sad.avg_midfield_overall)
+                AS home_avg_midfield_overall,
+            COALESCE(hsa.avg_attack_overall, sad.avg_attack_overall)
+                AS home_avg_attack_overall,
             COALESCE(hsa.squad_depth_proxy, sad.squad_depth_proxy) AS home_squad_depth_proxy,
         """
         if has_squad_attributes
@@ -157,6 +211,10 @@ def _load_consolidated_matches(
             0.0 AS home_avg_overall,
             0.0 AS home_avg_pace,
             0.0 AS home_avg_stamina,
+            0.0 AS home_avg_goalkeeper_overall,
+            0.0 AS home_avg_defense_overall,
+            0.0 AS home_avg_midfield_overall,
+            0.0 AS home_avg_attack_overall,
             0.0 AS home_squad_depth_proxy,
         """
     )
@@ -165,6 +223,14 @@ def _load_consolidated_matches(
             COALESCE(asa.avg_overall, sad.avg_overall) AS away_avg_overall,
             COALESCE(asa.avg_pace, sad.avg_pace) AS away_avg_pace,
             COALESCE(asa.avg_stamina, sad.avg_stamina) AS away_avg_stamina,
+            COALESCE(asa.avg_goalkeeper_overall, sad.avg_goalkeeper_overall)
+                AS away_avg_goalkeeper_overall,
+            COALESCE(asa.avg_defense_overall, sad.avg_defense_overall)
+                AS away_avg_defense_overall,
+            COALESCE(asa.avg_midfield_overall, sad.avg_midfield_overall)
+                AS away_avg_midfield_overall,
+            COALESCE(asa.avg_attack_overall, sad.avg_attack_overall)
+                AS away_avg_attack_overall,
             COALESCE(asa.squad_depth_proxy, sad.squad_depth_proxy) AS away_squad_depth_proxy,
         """
         if has_squad_attributes
@@ -172,6 +238,10 @@ def _load_consolidated_matches(
             0.0 AS away_avg_overall,
             0.0 AS away_avg_pace,
             0.0 AS away_avg_stamina,
+            0.0 AS away_avg_goalkeeper_overall,
+            0.0 AS away_avg_defense_overall,
+            0.0 AS away_avg_midfield_overall,
+            0.0 AS away_avg_attack_overall,
             0.0 AS away_squad_depth_proxy,
         """
     )
@@ -360,6 +430,38 @@ def _load_consolidated_matches(
         if has_fifa_world_ranking
         else ""
     )
+    home_match_stats_selects = _match_stats_selects(
+        table_alias="hms",
+        side="home",
+        available_columns=match_stats_columns,
+        has_match_stats=has_match_stats,
+    )
+    away_match_stats_selects = _match_stats_selects(
+        table_alias="ams",
+        side="away",
+        available_columns=match_stats_columns,
+        has_match_stats=has_match_stats,
+    )
+    match_stats_joins = (
+        f"""
+        LEFT JOIN f_match_stats AS hms
+            ON hms.source = 'fbref'
+            AND hms.match_id = m.match_id
+            AND (
+                lower(hms.team_id) = lower(m.home_team_id)
+                OR regexp_replace(lower(hms.team_id), '[^a-z0-9]+', '', 'g') = {home_team_key}
+            )
+        LEFT JOIN f_match_stats AS ams
+            ON ams.source = 'fbref'
+            AND ams.match_id = m.match_id
+            AND (
+                lower(ams.team_id) = lower(m.away_team_id)
+                OR regexp_replace(lower(ams.team_id), '[^a-z0-9]+', '', 'g') = {away_team_key}
+            )
+        """
+        if has_match_stats
+        else ""
+    )
 
     query = render_sql_template(
         "feature_pipeline/consolidated_matches.sql.j2",
@@ -400,11 +502,14 @@ def _load_consolidated_matches(
         ),
         home_squad_attribute_selects=home_squad_attribute_selects,
         away_squad_attribute_selects=away_squad_attribute_selects,
+        home_match_stats_selects=home_match_stats_selects,
+        away_match_stats_selects=away_match_stats_selects,
         world_football_elo_ratings_joins=world_football_elo_ratings_joins,
         fifa_world_ranking_joins=fifa_world_ranking_joins,
         world_cup_prior_history_joins=world_cup_prior_history_joins,
         world_cup_prior_discipline_joins=world_cup_prior_discipline_joins,
         squad_attribute_joins=squad_attribute_joins,
+        match_stats_joins=match_stats_joins,
         current_world_cup_flag=current_world_cup_flag,
         current_world_cup_exclusion=training_scope_filter,
     )
@@ -412,76 +517,91 @@ def _load_consolidated_matches(
     return relation.pl()
 
 
-def _world_football_elo_ratings_tables_available(con: duckdb.DuckDBPyConnection) -> bool:
-    tables = ("d_world_football_elo_ratings", "d_world_football_elo_team_aliases")
-    return all(
+def _match_stats_selects(
+    *,
+    table_alias: str,
+    side: str,
+    available_columns: set[str],
+    has_match_stats: bool,
+) -> str:
+    """Return nullable FBref stat projections for a home or away side."""
+    xg_expr = _match_stats_column_expr(
+        table_alias,
+        "xg",
+        available_columns=available_columns,
+        has_match_stats=has_match_stats,
+    )
+    projections = [f"COALESCE({xg_expr}, m.{side}_xg) AS {side}_xg"]
+    for column in MATCH_STAT_FEATURES:
+        if column == "xg":
+            continue
+        column_expr = _match_stats_column_expr(
+            table_alias,
+            column,
+            available_columns=available_columns,
+            has_match_stats=has_match_stats,
+        )
+        projections.append(f"{column_expr} AS {side}_{column}")
+    return ",\n    ".join(projections) + ","
+
+
+def _match_stats_column_expr(
+    table_alias: str,
+    column: str,
+    *,
+    available_columns: set[str],
+    has_match_stats: bool,
+) -> str:
+    if has_match_stats and column in available_columns:
+        return f"{table_alias}.{column}"
+    return "NULL::DOUBLE"
+
+
+def _table_columns(con: duckdb.DuckDBPyConnection, table_name: str) -> set[str]:
+    if not _table_exists(con, table_name):
+        return set()
+    rows = con.execute(f"DESCRIBE {table_name}").fetchall()
+    return {str(row[0]).casefold() for row in rows}
+
+
+def _table_exists(con: duckdb.DuckDBPyConnection, table_name: str) -> bool:
+    return (
         con.execute(
             """
             SELECT COUNT(*)
             FROM information_schema.tables
             WHERE table_schema = 'main' AND table_name = ?
             """,
-            [table],
+            [table_name],
         ).fetchone()[0]
         > 0
-        for table in tables
     )
+
+
+def _world_football_elo_ratings_tables_available(con: duckdb.DuckDBPyConnection) -> bool:
+    tables = ("d_world_football_elo_ratings", "d_world_football_elo_team_aliases")
+    return all(_table_exists(con, table) for table in tables)
 
 
 def _fifa_world_ranking_tables_available(con: duckdb.DuckDBPyConnection) -> bool:
     tables = ("d_fifa_world_ranking", "d_fifa_world_ranking_team_aliases")
-    return all(
-        con.execute(
-            """
-            SELECT COUNT(*)
-            FROM information_schema.tables
-            WHERE table_schema = 'main' AND table_name = ?
-            """,
-            [table],
-        ).fetchone()[0]
-        > 0
-        for table in tables
-    )
+    return all(_table_exists(con, table) for table in tables)
 
 
 def _squad_attributes_table_available(con: duckdb.DuckDBPyConnection) -> bool:
-    return (
-        con.execute(
-            """
-            SELECT COUNT(*)
-            FROM information_schema.tables
-            WHERE table_schema = 'main' AND table_name = 'd_squad_attributes'
-            """,
-        ).fetchone()[0]
-        > 0
-    )
+    return _table_exists(con, "d_squad_attributes")
+
+
+def _match_stats_table_available(con: duckdb.DuckDBPyConnection) -> bool:
+    return _table_exists(con, "f_match_stats")
 
 
 def _world_cup_prior_history_table_available(con: duckdb.DuckDBPyConnection) -> bool:
-    return (
-        con.execute(
-            """
-            SELECT COUNT(*)
-            FROM information_schema.tables
-            WHERE table_schema = 'main' AND table_name = 'd_world_cup_prior_team_history'
-            """,
-        ).fetchone()[0]
-        > 0
-    )
+    return _table_exists(con, "d_world_cup_prior_team_history")
 
 
 def _world_cup_prior_discipline_table_available(con: duckdb.DuckDBPyConnection) -> bool:
-    return (
-        con.execute(
-            """
-            SELECT COUNT(*)
-            FROM information_schema.tables
-            WHERE table_schema = 'main'
-              AND table_name = 'd_world_cup_prior_discipline_history'
-            """,
-        ).fetchone()[0]
-        > 0
-    )
+    return _table_exists(con, "d_world_cup_prior_discipline_history")
 
 
 def _build_team_level_features(
@@ -495,6 +615,8 @@ def _build_team_level_features(
 
     match_df = _ensure_prior_world_cup_columns(match_df)
     match_df = _ensure_prior_world_cup_discipline_columns(match_df)
+    match_df = _ensure_squad_position_columns(match_df)
+    match_df = _ensure_match_stat_columns(match_df)
     home_team = _build_side_frame(match_df, side="home")
     away_team = _build_side_frame(match_df, side="away")
 
@@ -553,10 +675,63 @@ def _build_team_level_features(
         (pl.col("team_avg_overall") - pl.col("team_avg_overall_away")).alias("avg_overall_diff"),
         (pl.col("team_avg_pace") - pl.col("team_avg_pace_away")).alias("avg_pace_diff"),
         (pl.col("team_avg_stamina") - pl.col("team_avg_stamina_away")).alias("avg_stamina_diff"),
+        (pl.col("team_avg_goalkeeper_overall") - pl.col("team_avg_goalkeeper_overall_away")).alias(
+            "avg_goalkeeper_overall_diff"
+        ),
+        (pl.col("team_avg_defense_overall") - pl.col("team_avg_defense_overall_away")).alias(
+            "avg_defense_overall_diff"
+        ),
+        (pl.col("team_avg_midfield_overall") - pl.col("team_avg_midfield_overall_away")).alias(
+            "avg_midfield_overall_diff"
+        ),
+        (pl.col("team_avg_attack_overall") - pl.col("team_avg_attack_overall_away")).alias(
+            "avg_attack_overall_diff"
+        ),
         (pl.col("team_squad_depth_proxy") - pl.col("team_squad_depth_proxy_away")).alias(
             "squad_depth_proxy"
         ),
         (pl.col("recent_form") - pl.col("recent_form_away")).alias("recent_form_diff"),
+        (pl.col("recent_xg_for") - pl.col("recent_xg_for_away")).alias("recent_xg_for_diff"),
+        (pl.col("recent_xg_against") - pl.col("recent_xg_against_away")).alias(
+            "recent_xg_against_diff"
+        ),
+        (pl.col("recent_possession_pct") - pl.col("recent_possession_pct_away")).alias(
+            "recent_possession_pct_diff"
+        ),
+        (pl.col("recent_shots_for") - pl.col("recent_shots_for_away")).alias(
+            "recent_shots_for_diff"
+        ),
+        (pl.col("recent_shots_against") - pl.col("recent_shots_against_away")).alias(
+            "recent_shots_against_diff"
+        ),
+        (pl.col("recent_shots_on_target_for") - pl.col("recent_shots_on_target_for_away")).alias(
+            "recent_shots_on_target_for_diff"
+        ),
+        (
+            pl.col("recent_shots_on_target_against") - pl.col("recent_shots_on_target_against_away")
+        ).alias("recent_shots_on_target_against_diff"),
+        (pl.col("recent_corners_for") - pl.col("recent_corners_for_away")).alias(
+            "recent_corners_for_diff"
+        ),
+        (pl.col("recent_corners_against") - pl.col("recent_corners_against_away")).alias(
+            "recent_corners_against_diff"
+        ),
+        (pl.col("recent_yellow_cards") - pl.col("recent_yellow_cards_away")).alias(
+            "recent_yellow_cards_diff"
+        ),
+        (pl.col("recent_red_cards") - pl.col("recent_red_cards_away")).alias(
+            "recent_red_cards_diff"
+        ),
+        (
+            pl.col("opponent_adjusted_recent_form") - pl.col("opponent_adjusted_recent_form_away")
+        ).alias("opponent_adjusted_recent_form_diff"),
+        (pl.col("recent_official_form") - pl.col("recent_official_form_away")).alias(
+            "recent_official_form_diff"
+        ),
+        (pl.col("recent_friendly_form") - pl.col("recent_friendly_form_away")).alias(
+            "recent_friendly_form_diff"
+        ),
+        pl.col("is_friendly_match"),
         pl.col("target"),
     ]
     if include_metadata:
@@ -605,8 +780,27 @@ def _empty_feature_frame(*, include_metadata: bool) -> pl.DataFrame:
             "avg_overall_diff": pl.Float64,
             "avg_pace_diff": pl.Float64,
             "avg_stamina_diff": pl.Float64,
+            "avg_goalkeeper_overall_diff": pl.Float64,
+            "avg_defense_overall_diff": pl.Float64,
+            "avg_midfield_overall_diff": pl.Float64,
+            "avg_attack_overall_diff": pl.Float64,
             "squad_depth_proxy": pl.Float64,
             "recent_form_diff": pl.Float64,
+            "recent_xg_for_diff": pl.Float64,
+            "recent_xg_against_diff": pl.Float64,
+            "recent_possession_pct_diff": pl.Float64,
+            "recent_shots_for_diff": pl.Float64,
+            "recent_shots_against_diff": pl.Float64,
+            "recent_shots_on_target_for_diff": pl.Float64,
+            "recent_shots_on_target_against_diff": pl.Float64,
+            "recent_corners_for_diff": pl.Float64,
+            "recent_corners_against_diff": pl.Float64,
+            "recent_yellow_cards_diff": pl.Float64,
+            "recent_red_cards_diff": pl.Float64,
+            "opponent_adjusted_recent_form_diff": pl.Float64,
+            "recent_official_form_diff": pl.Float64,
+            "recent_friendly_form_diff": pl.Float64,
+            "is_friendly_match": pl.Float64,
             "target": pl.Float64,
         }
     )
@@ -643,6 +837,37 @@ def _ensure_prior_world_cup_discipline_columns(match_df: pl.DataFrame) -> pl.Dat
     if not missing_columns:
         return match_df
     return match_df.with_columns(pl.lit(0.0).alias(column) for column in missing_columns)
+
+
+def _ensure_squad_position_columns(match_df: pl.DataFrame) -> pl.DataFrame:
+    """Backfill optional positional squad attributes for direct unit-test frames."""
+    required_columns = tuple(
+        f"{side}_{feature}" for side in ("home", "away") for feature in SQUAD_POSITION_FEATURES
+    )
+    missing_columns = [column for column in required_columns if column not in match_df.columns]
+    if not missing_columns:
+        return match_df
+
+    fallback_expressions = []
+    for column in missing_columns:
+        side = column.split("_", 1)[0]
+        fallback_column = f"{side}_avg_overall"
+        fallback = pl.col(fallback_column) if fallback_column in match_df.columns else pl.lit(0.0)
+        fallback_expressions.append(fallback.alias(column))
+    return match_df.with_columns(fallback_expressions)
+
+
+def _ensure_match_stat_columns(match_df: pl.DataFrame) -> pl.DataFrame:
+    """Backfill nullable optional match stat columns for direct unit-test frames."""
+    required_columns = tuple(
+        f"{side}_{feature}" for side in ("home", "away") for feature in MATCH_STAT_FEATURES
+    )
+    missing_columns = [column for column in required_columns if column not in match_df.columns]
+    if not missing_columns:
+        return match_df
+    return match_df.with_columns(
+        pl.lit(None, dtype=pl.Float64).alias(column) for column in missing_columns
+    )
 
 
 def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
@@ -720,8 +945,27 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
                 pl.col("away_avg_pace").alias("opponent_avg_pace"),
                 pl.col("home_avg_stamina").alias("team_avg_stamina"),
                 pl.col("away_avg_stamina").alias("opponent_avg_stamina"),
+                pl.col("home_avg_goalkeeper_overall").alias("team_avg_goalkeeper_overall"),
+                pl.col("away_avg_goalkeeper_overall").alias("opponent_avg_goalkeeper_overall"),
+                pl.col("home_avg_defense_overall").alias("team_avg_defense_overall"),
+                pl.col("away_avg_defense_overall").alias("opponent_avg_defense_overall"),
+                pl.col("home_avg_midfield_overall").alias("team_avg_midfield_overall"),
+                pl.col("away_avg_midfield_overall").alias("opponent_avg_midfield_overall"),
+                pl.col("home_avg_attack_overall").alias("team_avg_attack_overall"),
+                pl.col("away_avg_attack_overall").alias("opponent_avg_attack_overall"),
                 pl.col("home_squad_depth_proxy").alias("team_squad_depth_proxy"),
                 pl.col("away_squad_depth_proxy").alias("opponent_squad_depth_proxy"),
+                pl.col("home_xg").alias("xg_for"),
+                pl.col("away_xg").alias("xg_against"),
+                pl.col("home_possession_pct").alias("possession_pct"),
+                pl.col("home_shots").alias("shots_for"),
+                pl.col("away_shots").alias("shots_against"),
+                pl.col("home_shots_on_target").alias("shots_on_target_for"),
+                pl.col("away_shots_on_target").alias("shots_on_target_against"),
+                pl.col("home_corners").alias("corners_for"),
+                pl.col("away_corners").alias("corners_against"),
+                pl.col("home_yellow_cards").alias("yellow_cards"),
+                pl.col("home_red_cards").alias("red_cards"),
                 pl.col("home_team_score").alias("goals_for"),
                 pl.col("away_team_score").alias("goals_against"),
                 pl.col("home_team_score").alias("target"),
@@ -791,8 +1035,27 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
             pl.col("home_avg_pace").alias("opponent_avg_pace"),
             pl.col("away_avg_stamina").alias("team_avg_stamina"),
             pl.col("home_avg_stamina").alias("opponent_avg_stamina"),
+            pl.col("away_avg_goalkeeper_overall").alias("team_avg_goalkeeper_overall"),
+            pl.col("home_avg_goalkeeper_overall").alias("opponent_avg_goalkeeper_overall"),
+            pl.col("away_avg_defense_overall").alias("team_avg_defense_overall"),
+            pl.col("home_avg_defense_overall").alias("opponent_avg_defense_overall"),
+            pl.col("away_avg_midfield_overall").alias("team_avg_midfield_overall"),
+            pl.col("home_avg_midfield_overall").alias("opponent_avg_midfield_overall"),
+            pl.col("away_avg_attack_overall").alias("team_avg_attack_overall"),
+            pl.col("home_avg_attack_overall").alias("opponent_avg_attack_overall"),
             pl.col("away_squad_depth_proxy").alias("team_squad_depth_proxy"),
             pl.col("home_squad_depth_proxy").alias("opponent_squad_depth_proxy"),
+            pl.col("away_xg").alias("xg_for"),
+            pl.col("home_xg").alias("xg_against"),
+            pl.col("away_possession_pct").alias("possession_pct"),
+            pl.col("away_shots").alias("shots_for"),
+            pl.col("home_shots").alias("shots_against"),
+            pl.col("away_shots_on_target").alias("shots_on_target_for"),
+            pl.col("home_shots_on_target").alias("shots_on_target_against"),
+            pl.col("away_corners").alias("corners_for"),
+            pl.col("home_corners").alias("corners_against"),
+            pl.col("away_yellow_cards").alias("yellow_cards"),
+            pl.col("away_red_cards").alias("red_cards"),
             pl.col("away_team_score").alias("goals_for"),
             pl.col("home_team_score").alias("goals_against"),
             pl.col("away_team_score").alias("target"),
@@ -839,9 +1102,19 @@ def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("opponent_avg_pace"),
             pl.col("team_avg_stamina"),
             pl.col("opponent_avg_stamina"),
+            pl.col("team_avg_goalkeeper_overall"),
+            pl.col("opponent_avg_goalkeeper_overall"),
+            pl.col("team_avg_defense_overall"),
+            pl.col("opponent_avg_defense_overall"),
+            pl.col("team_avg_midfield_overall"),
+            pl.col("opponent_avg_midfield_overall"),
+            pl.col("team_avg_attack_overall"),
+            pl.col("opponent_avg_attack_overall"),
             pl.col("team_squad_depth_proxy"),
             pl.col("opponent_squad_depth_proxy"),
             pl.col("recent_form"),
+            *[pl.col(column) for column in ROLLING_FEATURE_DEFAULTS],
+            pl.col("is_friendly_match"),
             pl.col("target"),
         ]
     )
@@ -851,7 +1124,25 @@ def _recent_form_for_team(team_df: pl.DataFrame) -> pl.DataFrame:
     """Compute recent form without letting 2026 World Cup rows enter history."""
     goals_for_history: list[float] = []
     goals_against_history: list[float] = []
+    metric_histories: dict[str, list[float]] = {
+        "xg_for": [],
+        "xg_against": [],
+        "possession_pct": [],
+        "shots_for": [],
+        "shots_against": [],
+        "shots_on_target_for": [],
+        "shots_on_target_against": [],
+        "corners_for": [],
+        "corners_against": [],
+        "yellow_cards": [],
+        "red_cards": [],
+    }
+    adjusted_form_history: list[float] = []
+    official_form_history: list[float] = []
+    friendly_form_history: list[float] = []
     recent_form: list[float] = []
+    rolling_values: dict[str, list[float]] = {column: [] for column in ROLLING_FEATURE_DEFAULTS}
+    is_friendly_match: list[float] = []
 
     for row in team_df.iter_rows(named=True):
         if goals_for_history:
@@ -864,12 +1155,88 @@ def _recent_form_for_team(team_df: pl.DataFrame) -> pl.DataFrame:
             form = 0.0
 
         recent_form.append(form)
+        rolling_values["recent_xg_for"].append(_rolling_average(metric_histories["xg_for"]))
+        rolling_values["recent_xg_against"].append(_rolling_average(metric_histories["xg_against"]))
+        rolling_values["recent_possession_pct"].append(
+            _rolling_average(metric_histories["possession_pct"])
+        )
+        rolling_values["recent_shots_for"].append(_rolling_average(metric_histories["shots_for"]))
+        rolling_values["recent_shots_against"].append(
+            _rolling_average(metric_histories["shots_against"])
+        )
+        rolling_values["recent_shots_on_target_for"].append(
+            _rolling_average(metric_histories["shots_on_target_for"])
+        )
+        rolling_values["recent_shots_on_target_against"].append(
+            _rolling_average(metric_histories["shots_on_target_against"])
+        )
+        rolling_values["recent_corners_for"].append(
+            _rolling_average(metric_histories["corners_for"])
+        )
+        rolling_values["recent_corners_against"].append(
+            _rolling_average(metric_histories["corners_against"])
+        )
+        rolling_values["recent_yellow_cards"].append(
+            _rolling_average(metric_histories["yellow_cards"])
+        )
+        rolling_values["recent_red_cards"].append(_rolling_average(metric_histories["red_cards"]))
+        rolling_values["opponent_adjusted_recent_form"].append(
+            _rolling_average(adjusted_form_history)
+        )
+        rolling_values["recent_official_form"].append(_rolling_average(official_form_history))
+        rolling_values["recent_friendly_form"].append(_rolling_average(friendly_form_history))
+        friendly_match = _is_friendly_competition(row.get("competition"))
+        is_friendly_match.append(1.0 if friendly_match else 0.0)
 
         if not bool(row["is_current_world_cup"]):
-            goals_for_history.append(float(row["goals_for"]))
-            goals_against_history.append(float(row["goals_against"]))
+            goals_for = float(row["goals_for"])
+            goals_against = float(row["goals_against"])
+            goal_diff = goals_for - goals_against
+            goals_for_history.append(goals_for)
+            goals_against_history.append(goals_against)
+            opponent_rating = _maybe_float(row.get("opponent_world_cup_probability_elo_before"))
+            opponent_strength = (opponent_rating or 1500.0) / 1500.0
+            adjusted_form_history.append(goal_diff * opponent_strength)
+            if friendly_match:
+                friendly_form_history.append(goal_diff)
+            else:
+                official_form_history.append(goal_diff)
 
-    return team_df.with_columns(pl.Series("recent_form", recent_form))
+            for metric_name, history in metric_histories.items():
+                metric_value = _maybe_float(row.get(metric_name))
+                if metric_value is not None:
+                    history.append(metric_value)
+
+    return team_df.with_columns(
+        [
+            pl.Series("recent_form", recent_form),
+            *[pl.Series(column, values) for column, values in rolling_values.items()],
+            pl.Series("is_friendly_match", is_friendly_match),
+        ]
+    )
+
+
+def _rolling_average(values: list[float], *, window: int = 5) -> float:
+    recent_values = values[-window:]
+    if not recent_values:
+        return 0.0
+    return sum(recent_values) / len(recent_values)
+
+
+def _maybe_float(value: object) -> float | None:
+    if value is None:
+        return None
+    numeric_value = float(value)
+    if numeric_value != numeric_value:
+        return None
+    return numeric_value
+
+
+def _is_friendly_competition(competition: object) -> bool:
+    if competition is None:
+        return False
+    normalized = str(competition).casefold()
+    return "friendly" in normalized or "amistoso" in normalized
 
 
 def main() -> int:
