@@ -186,8 +186,9 @@ def build_elo_history(
         )
         _log_elo_parameters(parameters, calibrated=calibrate_parameters)
 
+        progress_interval = _elo_progress_interval(len(matches))
         LOGGER.info("Processing %d matches in strict chronological order.", len(matches))
-        for match in matches:
+        for match_number, match in enumerate(matches, start=1):
             home_before = ratings.get(match.home_team_id, initial_world_cup_probability_elo)
             away_before = ratings.get(match.away_team_id, initial_world_cup_probability_elo)
 
@@ -253,8 +254,34 @@ def build_elo_history(
                 calibration_validation_error=parameters.validation_error,
                 neutral_site=neutral_site,
             )
+            if _should_log_elo_progress(match_number, len(matches), progress_interval):
+                LOGGER.info(
+                    "Elo progress: match %d/%d processed (%.1f%% complete).",
+                    match_number,
+                    len(matches),
+                    100 * match_number / len(matches),
+                )
 
     LOGGER.info("World Cup Probability Elo history updated successfully.")
+
+
+def _elo_progress_interval(match_count: int) -> int:
+    return max(1, min(1_000, match_count // 100 or 1))
+
+
+def _should_log_elo_progress(
+    match_number: int,
+    match_count: int,
+    progress_interval: int,
+) -> bool:
+    return (
+        match_count > 0
+        and (
+            match_number == 1
+            or match_number == match_count
+            or match_number % progress_interval == 0
+        )
+    )
 
 
 def _calibrate_elo_parameters(
