@@ -42,6 +42,7 @@ Para uma execução completa com dados atualizados:
 uv run download-data --ea-fc-dataset flynn28/eafc26-player-database
 uv run load-data --ea-fc-dataset flynn28/eafc26-player-database
 uv run pipeline --iterations 100000 --batch-size 2500 --seed 42
+uv run update-world-cup-results
 uv run dashboard
 ```
 
@@ -386,6 +387,19 @@ Flags úteis:
 - `--validation-fraction <float>`
 
 ## Dashboard
+
+### `update-world-cup-results`
+
+Busca placares reais atualizados da Copa 2026 na API publica da FIFA e grava o
+cache local em `data/raw/fifa/world_cup_2026_results.json`.
+
+```powershell
+uv run update-world-cup-results
+uv run update-world-cup-results --force
+```
+
+O dashboard tambem executa essa busca automaticamente quando existem jogos ja
+passados sem placar no cache local.
 
 ### `dashboard`
 
