@@ -40,9 +40,11 @@ try:
         train_poisson_model,
         tune_poisson_hyperparameters,
     )
+    from .outcome_model import train_outcome_pipeline
+    from .outcome_predictions import build_outcome_predictions
     from .settings import DB_PATH as WAREHOUSE_DB_PATH
     from .settings import DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED
-    from .simulator import TeamLambda, simulate_world_cup
+    from .simulator import TeamLambda, load_outcome_model_context, simulate_world_cup
     from .sql_loader import render_sql_template
     from .world_cup_2026_schedule import TEAM_COUNTRIES, TEAM_NAMES
     from .world_football_elo_ratings import load_world_football_elo_ratings
@@ -69,9 +71,11 @@ except ImportError:  # pragma: no cover - supports direct script execution.
         train_poisson_model,
         tune_poisson_hyperparameters,
     )
+    from outcome_model import train_outcome_pipeline
+    from outcome_predictions import build_outcome_predictions
     from settings import DB_PATH as WAREHOUSE_DB_PATH
     from settings import DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED
-    from simulator import TeamLambda, simulate_world_cup
+    from simulator import TeamLambda, load_outcome_model_context, simulate_world_cup
     from sql_loader import render_sql_template
     from world_cup_2026_schedule import TEAM_COUNTRIES, TEAM_NAMES
     from world_football_elo_ratings import load_world_football_elo_ratings
@@ -188,22 +192,22 @@ def run_pipeline(
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
 
-    LOGGER.info("Step 1/8: initializing DuckDB warehouse.")
+    LOGGER.info("Step 1/10: initializing DuckDB warehouse.")
     initialize_database(db_path=config.db_path)
 
-    LOGGER.info("Step 2/8: building World Cup Probability Elo history.")
+    LOGGER.info("Step 2/10: building World Cup Probability Elo history.")
     build_elo_history(db_path=config.db_path)
 
-    LOGGER.info("Step 3/8: loading World Football Elo Ratings snapshot.")
+    LOGGER.info("Step 3/10: loading World Football Elo Ratings snapshot.")
     load_world_football_elo_ratings(db_path=config.db_path)
 
-    LOGGER.info("Step 4/8: loading FIFA World Ranking snapshot.")
+    LOGGER.info("Step 4/10: loading FIFA World Ranking snapshot.")
     load_fifa_world_ranking(db_path=config.db_path)
 
-    LOGGER.info("Step 5/8: building feature frame.")
+    LOGGER.info("Step 5/10: building feature frame.")
     feature_frame = build_feature_frame(db_path=config.db_path, include_metadata=True)
 
-    LOGGER.info("Step 6/8: training Poisson XGBoost model.")
+    LOGGER.info("Step 6/10: training Poisson XGBoost model.")
     best_params = {}
     if config.tune_model:
         best_params = tune_poisson_hyperparameters(
@@ -237,17 +241,31 @@ def run_pipeline(
     save_model(model, MODEL_PATH)
     explain_model(model, X_valid, feature_names, BEESWARM_PATH)
 
-    LOGGER.info("Step 7/8: building team lambdas and running Monte Carlo simulation.")
+    LOGGER.info("Step 7/10: training calibrated win/draw/loss outcome model.")
+    train_outcome_pipeline(
+        db_path=config.db_path,
+        tune=config.tune_model,
+        optuna_trials=config.optuna_trials,
+        optuna_timeout_seconds=config.optuna_timeout_seconds,
+        validation_fraction=config.validation_fraction,
+    )
+
+    LOGGER.info("Step 8/10: writing dashboard win/draw/loss outcome predictions.")
+    build_outcome_predictions(db_path=config.db_path)
+
+    LOGGER.info("Step 9/10: building team lambdas and running Monte Carlo simulation.")
     team_lambdas = _build_team_lambdas(db_path=config.db_path, model=model)
+    outcome_model_context = load_outcome_model_context(db_path=config.db_path)
     simulate_world_cup(
         team_lambdas,
         iterations=config.iterations,
         batch_size=config.batch_size,
         db_path=config.db_path,
         seed=config.seed,
+        outcome_model_context=outcome_model_context,
     )
 
-    LOGGER.info("Step 8/8: exporting analytical summaries.")
+    LOGGER.info("Step 10/10: exporting analytical summaries.")
     export_analytics(db_path=config.db_path)
 
     LOGGER.info("Pipeline completed successfully.")
