@@ -41,6 +41,48 @@ def test_build_elo_history_upserts_existing_match(tmp_path: Path) -> None:
         )
 
     build_elo_history(db_path=db_path)
+
+    with duckdb.connect(str(db_path)) as con:
+        con.execute(
+            """
+            INSERT INTO f_elo_history (
+                match_id,
+                match_date,
+                home_team_id,
+                away_team_id,
+                home_rating_before,
+                away_rating_before,
+                home_rating_after,
+                away_rating_after,
+                home_expected_score,
+                away_expected_score,
+                home_actual_score,
+                away_actual_score,
+                k_factor,
+                competition_weight,
+                home_advantage_points,
+                updated_at
+            ) VALUES (
+                'stale',
+                DATE '2020-01-01',
+                'Old A',
+                'Old B',
+                1500.0,
+                1500.0,
+                1500.0,
+                1500.0,
+                0.5,
+                0.5,
+                0.5,
+                0.5,
+                20.0,
+                1.0,
+                0.0,
+                current_timestamp
+            )
+            """
+        )
+
     build_elo_history(db_path=db_path)
 
     with duckdb.connect(str(db_path)) as con:
@@ -64,6 +106,14 @@ def test_build_elo_history_upserts_existing_match(tmp_path: Path) -> None:
             WHERE match_id = 'm_wc'
             """
         ).fetchone()[0]
+        stale_rows = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM f_elo_history
+            WHERE match_id = 'stale'
+            """
+        ).fetchone()[0]
 
     assert row == (1, 1500.0, 1500.0, 1.0, 0.0, True)
     assert world_cup_rows == 0
+    assert stale_rows == 0
