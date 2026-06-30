@@ -37,6 +37,7 @@ train-outcome-model = "src.outcome_model:main"
 predict-outcomes = "src.outcome_predictions:main"
 simulate = "src.simulator:main"
 analytics = "src.analytics:main"
+update-world-cup-results = "src.live_results:main"
 pipeline = "src.orchestrator:main"
 dashboard = "src.app:cli"
 
