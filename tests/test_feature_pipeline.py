@@ -3,11 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckdb
+import polars as pl
 import pytest
 
 from src.db_init import initialize_database
 from src.elo_engine import initialize_elo_history
-from src.feature_pipeline import build_feature_frame
+from src.feature_pipeline import _build_team_level_features, build_feature_frame
 
 
 def test_build_feature_frame_includes_prior_world_cup_diffs(tmp_path: Path) -> None:
@@ -159,3 +160,13 @@ def test_build_feature_frame_includes_prior_world_cup_diffs(tmp_path: Path) -> N
     assert row["prior_world_cup_yellow_cards_per_match_diff"] == pytest.approx(0.3)
     assert row["prior_world_cup_sending_offs_per_match_diff"] == pytest.approx(-0.1)
     assert row["prior_world_cup_fair_play_penalty_per_match_diff"] == pytest.approx(0.1)
+
+
+def test_build_team_level_features_returns_public_schema_for_empty_input() -> None:
+    frame = _build_team_level_features(pl.DataFrame(), include_metadata=True)
+
+    assert frame.height == 0
+    assert "home_goals" in frame.columns
+    assert "away_goals" in frame.columns
+    assert "world_cup_probability_elo_diff" in frame.columns
+    assert "target" in frame.columns
