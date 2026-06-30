@@ -6,6 +6,7 @@ from pathlib import Path
 import duckdb
 
 from src.app import (
+    PREDICTION_SOURCE_SIMULATION,
     RoundOption,
     _accuracy_summary,
     _actual_group_standings,
@@ -138,6 +139,119 @@ def test_load_round_probabilities_includes_modal_model_score(tmp_path: Path) -> 
     assert rows[0]["away_win_pct"] == 27.5
     assert rows[0]["probability_source"] == "outcome_model"
     assert _format_score(rows[0]) == "1 x 0"
+
+
+def test_load_round_probabilities_can_use_simulation_source(tmp_path: Path) -> None:
+    db_path = tmp_path / "world_cup.duckdb"
+    with duckdb.connect(str(db_path)) as con:
+        con.execute(
+            """
+            CREATE TABLE simulated_results (
+                simulation_id INTEGER NOT NULL,
+                match_number INTEGER NOT NULL,
+                group_name VARCHAR,
+                home_team_id VARCHAR NOT NULL,
+                home_team_name VARCHAR NOT NULL,
+                away_team_id VARCHAR NOT NULL,
+                away_team_name VARCHAR NOT NULL,
+                home_goals INTEGER NOT NULL,
+                away_goals INTEGER NOT NULL
+            )
+            """,
+        )
+        con.executemany(
+            """
+            INSERT INTO simulated_results (
+                simulation_id,
+                match_number,
+                group_name,
+                home_team_id,
+                home_team_name,
+                away_team_id,
+                away_team_name,
+                home_goals,
+                away_goals
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, 1, "Group A", "BRA", "Brazil", "ARG", "Argentina", 2, 1),
+                (2, 1, "Group A", "BRA", "Brazil", "ARG", "Argentina", 2, 1),
+                (3, 1, "Group A", "BRA", "Brazil", "ARG", "Argentina", 0, 0),
+                (4, 1, "Group A", "BRA", "Brazil", "ARG", "Argentina", 0, 1),
+            ],
+        )
+        con.execute(
+            """
+            CREATE TABLE outcome_predictions (
+                match_number INTEGER PRIMARY KEY,
+                round_name VARCHAR NOT NULL,
+                group_name VARCHAR,
+                match_date TIMESTAMP,
+                home_team_id VARCHAR NOT NULL,
+                home_team_name VARCHAR NOT NULL,
+                away_team_id VARCHAR NOT NULL,
+                away_team_name VARCHAR NOT NULL,
+                home_win_pct DOUBLE NOT NULL,
+                draw_pct DOUBLE NOT NULL,
+                away_win_pct DOUBLE NOT NULL,
+                predicted_outcome VARCHAR NOT NULL,
+                calibration_temperature DOUBLE,
+                model_path VARCHAR,
+                created_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO outcome_predictions (
+                match_number,
+                round_name,
+                group_name,
+                match_date,
+                home_team_id,
+                home_team_name,
+                away_team_id,
+                away_team_name,
+                home_win_pct,
+                draw_pct,
+                away_win_pct,
+                predicted_outcome,
+                calibration_temperature,
+                model_path,
+                created_at
+            ) VALUES (
+                1,
+                'group_stage',
+                'Group A',
+                TIMESTAMP '2026-06-11 19:00:00',
+                'BRA',
+                'Brazil',
+                'ARG',
+                'Argentina',
+                1.0,
+                98.0,
+                1.0,
+                'draw',
+                2.0,
+                'models/xgb_outcome_model.json',
+                current_timestamp
+            )
+            """
+        )
+
+    rows = _load_round_probabilities(
+        str(db_path),
+        (1,),
+        show_all_matchups=True,
+        dynamic_matchups=False,
+        prediction_source=PREDICTION_SOURCE_SIMULATION,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["home_win_pct"] == 50.0
+    assert rows[0]["draw_pct"] == 25.0
+    assert rows[0]["away_win_pct"] == 25.0
+    assert rows[0]["probability_source"] == "simulation"
 
 
 def test_add_played_fixture_result_marks_winner_hit() -> None:
