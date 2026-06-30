@@ -376,6 +376,14 @@ def load_fbref_match_stats(
         tournament_col = _optional_column(lookup, ("competition", "tournament", "league"))
         xg_col = _required_column(lookup, ("xg", "expected_goals"))
         possession_col = _optional_column(lookup, ("possession", "poss", "possession_pct"))
+        shots_col = _optional_column(lookup, ("shots", "sh", "total_shots"))
+        shots_on_target_col = _optional_column(
+            lookup,
+            ("shots_on_target", "sot", "shots_on_goal"),
+        )
+        corners_col = _optional_column(lookup, ("corners", "corner_kicks", "ck"))
+        yellow_cards_col = _optional_column(lookup, ("yellow_cards", "yc", "cards_yellow"))
+        red_cards_col = _optional_column(lookup, ("red_cards", "rc", "cards_red"))
 
         date_expr = f"CAST({_quote_identifier(date_col)} AS DATE)"
         team_expr = f"CAST({_quote_identifier(team_col)} AS VARCHAR)"
@@ -392,6 +400,23 @@ def load_fbref_match_stats(
         xg_expr = _numeric_expression(xg_col)
         possession_expr = (
             _numeric_expression(possession_col) if possession_col is not None else "NULL::DOUBLE"
+        )
+        shots_expr = _numeric_expression(shots_col) if shots_col is not None else "NULL::DOUBLE"
+        shots_on_target_expr = (
+            _numeric_expression(shots_on_target_col)
+            if shots_on_target_col is not None
+            else "NULL::DOUBLE"
+        )
+        corners_expr = (
+            _numeric_expression(corners_col) if corners_col is not None else "NULL::DOUBLE"
+        )
+        yellow_cards_expr = (
+            _numeric_expression(yellow_cards_col)
+            if yellow_cards_col is not None
+            else "NULL::DOUBLE"
+        )
+        red_cards_expr = (
+            _numeric_expression(red_cards_col) if red_cards_col is not None else "NULL::DOUBLE"
         )
         source_file_expr = _sql_string_literal(str(source_file))
 
@@ -413,6 +438,11 @@ def load_fbref_match_stats(
                 tournament,
                 xg,
                 possession_pct,
+                shots,
+                shots_on_target,
+                corners,
+                yellow_cards,
+                red_cards,
                 source,
                 source_file,
                 loaded_at
@@ -424,7 +454,12 @@ def load_fbref_match_stats(
                     {opponent_expr} AS opponent_team_id,
                     {tournament_expr} AS tournament,
                     {xg_expr} AS xg,
-                    {possession_expr} AS possession_pct
+                    {possession_expr} AS possession_pct,
+                    {shots_expr} AS shots,
+                    {shots_on_target_expr} AS shots_on_target,
+                    {corners_expr} AS corners,
+                    {yellow_cards_expr} AS yellow_cards,
+                    {red_cards_expr} AS red_cards
                 FROM {source_sql}
                 WHERE {date_expr} >= ?
                   AND {team_expr} IS NOT NULL
@@ -448,6 +483,11 @@ def load_fbref_match_stats(
                     WHEN n.possession_pct IS NOT NULL THEN n.possession_pct * 100.0
                     ELSE NULL
                 END AS possession_pct,
+                n.shots,
+                n.shots_on_target,
+                n.corners,
+                n.yellow_cards,
+                n.red_cards,
                 'fbref' AS source,
                 {source_file_expr} AS source_file,
                 current_timestamp AS loaded_at
@@ -464,6 +504,11 @@ def load_fbref_match_stats(
                 tournament = excluded.tournament,
                 xg = excluded.xg,
                 possession_pct = excluded.possession_pct,
+                shots = excluded.shots,
+                shots_on_target = excluded.shots_on_target,
+                corners = excluded.corners,
+                yellow_cards = excluded.yellow_cards,
+                red_cards = excluded.red_cards,
                 source_file = excluded.source_file,
                 loaded_at = excluded.loaded_at
             """,
@@ -509,12 +554,21 @@ def load_squad_attributes(
         overall_col = _required_column(lookup, ("overall", "ova", "ovr"))
         pace_col = _optional_column(lookup, ("pace", "pac"))
         stamina_col = _optional_column(lookup, ("stamina", "sta"))
+        position_col = _optional_column(
+            lookup,
+            ("position", "pos", "player_positions", "club_position", "role"),
+        )
 
         team_expr = f"CAST({_quote_identifier(team_col)} AS VARCHAR)"
         overall_expr = _numeric_expression(overall_col)
         pace_expr = _numeric_expression(pace_col) if pace_col is not None else "NULL::DOUBLE"
         stamina_expr = (
             _numeric_expression(stamina_col) if stamina_col is not None else "NULL::DOUBLE"
+        )
+        position_expr = (
+            f"lower(CAST({_quote_identifier(position_col)} AS VARCHAR))"
+            if position_col is not None
+            else "NULL::VARCHAR"
         )
         source_file_expr = _sql_string_literal(str(source_file))
 
@@ -531,6 +585,10 @@ def load_squad_attributes(
                 avg_overall,
                 avg_pace,
                 avg_stamina,
+                avg_goalkeeper_overall,
+                avg_defense_overall,
+                avg_midfield_overall,
+                avg_attack_overall,
                 sampled_player_count,
                 source_dataset,
                 source_file,
@@ -542,6 +600,37 @@ def load_squad_attributes(
                     {overall_expr} AS overall,
                     {pace_expr} AS pace,
                     {stamina_expr} AS stamina,
+                    CASE
+                        WHEN {position_expr} IS NULL THEN NULL
+                        WHEN {position_expr} LIKE '%gk%'
+                            OR {position_expr} LIKE '%goalkeeper%'
+                            OR {position_expr} LIKE '%keeper%'
+                            THEN 'goalkeeper'
+                        WHEN {position_expr} LIKE '%cb%'
+                            OR {position_expr} LIKE '%lb%'
+                            OR {position_expr} LIKE '%rb%'
+                            OR {position_expr} LIKE '%lwb%'
+                            OR {position_expr} LIKE '%rwb%'
+                            OR {position_expr} LIKE '%def%'
+                            OR {position_expr} LIKE '%back%'
+                            THEN 'defense'
+                        WHEN {position_expr} LIKE '%cm%'
+                            OR {position_expr} LIKE '%cdm%'
+                            OR {position_expr} LIKE '%cam%'
+                            OR {position_expr} LIKE '%lm%'
+                            OR {position_expr} LIKE '%rm%'
+                            OR {position_expr} LIKE '%mid%'
+                            THEN 'midfield'
+                        WHEN {position_expr} LIKE '%st%'
+                            OR {position_expr} LIKE '%cf%'
+                            OR {position_expr} LIKE '%lw%'
+                            OR {position_expr} LIKE '%rw%'
+                            OR {position_expr} LIKE '%forward%'
+                            OR {position_expr} LIKE '%winger%'
+                            OR {position_expr} LIKE '%attack%'
+                            THEN 'attack'
+                        ELSE NULL
+                    END AS position_group,
                     ROW_NUMBER() OVER (
                         PARTITION BY {team_expr}
                         ORDER BY {overall_expr} DESC NULLS LAST
@@ -561,6 +650,22 @@ def load_squad_attributes(
                 AVG(overall) AS avg_overall,
                 AVG(pace) AS avg_pace,
                 AVG(stamina) AS avg_stamina,
+                COALESCE(
+                    AVG(CASE WHEN position_group = 'goalkeeper' THEN overall END),
+                    AVG(overall)
+                ) AS avg_goalkeeper_overall,
+                COALESCE(
+                    AVG(CASE WHEN position_group = 'defense' THEN overall END),
+                    AVG(overall)
+                ) AS avg_defense_overall,
+                COALESCE(
+                    AVG(CASE WHEN position_group = 'midfield' THEN overall END),
+                    AVG(overall)
+                ) AS avg_midfield_overall,
+                COALESCE(
+                    AVG(CASE WHEN position_group = 'attack' THEN overall END),
+                    AVG(overall)
+                ) AS avg_attack_overall,
                 COUNT(*)::INTEGER AS sampled_player_count,
                 ? AS source_dataset,
                 {source_file_expr} AS source_file,
@@ -571,6 +676,10 @@ def load_squad_attributes(
                 avg_overall = excluded.avg_overall,
                 avg_pace = excluded.avg_pace,
                 avg_stamina = excluded.avg_stamina,
+                avg_goalkeeper_overall = excluded.avg_goalkeeper_overall,
+                avg_defense_overall = excluded.avg_defense_overall,
+                avg_midfield_overall = excluded.avg_midfield_overall,
+                avg_attack_overall = excluded.avg_attack_overall,
                 sampled_player_count = excluded.sampled_player_count,
                 source_dataset = excluded.source_dataset,
                 source_file = excluded.source_file,
@@ -2033,8 +2142,7 @@ def _resolve_fjelstul_worldcup_raw(raw_dir: Path) -> Path:
     raw_file = raw_dir / "fjelstul_worldcup" / FJELSTUL_WORLDCUP_RAW_FILENAME
     if not _has_existing_file(raw_file):
         raise FileNotFoundError(
-            "No Fjelstul World Cup raw CSV found. Run download-data with "
-            "--sources fjelstul first."
+            "No Fjelstul World Cup raw CSV found. Run download-data with --sources fjelstul first."
         )
     return raw_file
 
