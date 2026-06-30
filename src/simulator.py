@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
@@ -23,6 +24,13 @@ import xgboost as xgb
 
 try:
     from .analytics import export_analytics
+    from .outcome_model import OUTCOME_CALIBRATION_PATH, OUTCOME_MODEL_PATH
+    from .outcome_predictions import (
+        build_current_world_cup_team_features,
+        load_calibration_temperature,
+        load_outcome_model_artifact,
+        predict_match_probabilities,
+    )
     from .settings import (
         DB_PATH,
         DEFAULT_BATCH_SIZE,
@@ -38,6 +46,13 @@ try:
     )
 except ImportError:  # pragma: no cover - supports direct script execution.
     from analytics import export_analytics
+    from outcome_model import OUTCOME_CALIBRATION_PATH, OUTCOME_MODEL_PATH
+    from outcome_predictions import (
+        build_current_world_cup_team_features,
+        load_calibration_temperature,
+        load_outcome_model_artifact,
+        predict_match_probabilities,
+    )
     from settings import DB_PATH, DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED, MODEL_PATH
     from world_cup_2026_schedule import (  # type: ignore[no-redef]
         TEAM_COUNTRIES,
@@ -53,6 +68,15 @@ REST_DAY_EDGE_MULTIPLIER = 0.03
 MAX_REST_DAY_EDGE = 3.0
 EXPECTED_TEAM_COUNT = 48
 EXPECTED_MATCH_COUNT = 104
+POISSON_SCORE_ENGINE = "poisson"
+OUTCOME_HYBRID_SCORE_ENGINE = "outcome_hybrid"
+DIXON_COLES_POISSON_SCORE_ENGINE = "poisson_dixon_coles"
+DIXON_COLES_OUTCOME_HYBRID_SCORE_ENGINE = "outcome_hybrid_dixon_coles"
+DEFAULT_DIXON_COLES_RHO = -0.10
+MIN_DIXON_COLES_RHO = -0.95
+MAX_DIXON_COLES_RHO = 0.95
+MAX_DIXON_COLES_SCORE_ATTEMPTS = 64
+MAX_CONDITIONAL_SCORE_ATTEMPTS = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +88,15 @@ class TeamLambda:
     lambda_goals: float
     country_code: str | None = None
     fair_play_penalty_rate: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeModelContext:
+    """Loaded V/E/D model artifacts used by hybrid Monte Carlo scoring."""
+
+    model: xgb.XGBClassifier
+    team_features: dict[str, dict[str, float]]
+    calibration_temperature: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +128,11 @@ class SimulatedMatch:
     away_rest_days: float | None
     home_advantage: bool
     away_advantage: bool
+    score_engine: str
+    sampled_outcome: str | None
+    outcome_home_win_pct: float | None
+    outcome_draw_pct: float | None
+    outcome_away_win_pct: float | None
     created_at: datetime
 
 
@@ -158,6 +196,11 @@ def initialize_simulated_results(db_path: Path = DB_PATH) -> None:
                 away_rest_days DOUBLE,
                 home_advantage BOOLEAN,
                 away_advantage BOOLEAN,
+                score_engine VARCHAR,
+                sampled_outcome VARCHAR,
+                outcome_home_win_pct DOUBLE,
+                outcome_draw_pct DOUBLE,
+                outcome_away_win_pct DOUBLE,
                 created_at TIMESTAMP NOT NULL
             );
             """,
@@ -174,8 +217,11 @@ def simulate_match(
     venue_country: str | None = None,
     home_rest_days: float | None = None,
     away_rest_days: float | None = None,
+    outcome_probabilities: tuple[float, float, float] | None = None,
+    dixon_coles_rho: float = DEFAULT_DIXON_COLES_RHO,
 ) -> SimulatedMatch:
-    """Simulate a single match using Poisson scoring and optional penalties."""
+    """Simulate a single match using Dixon-Coles adjusted Poisson scoring."""
+    _validate_dixon_coles_rho(dixon_coles_rho)
     home_advantage = _has_host_advantage(home_team, venue_country)
     away_advantage = _has_host_advantage(away_team, venue_country)
     home_lambda = _adjust_lambda(
@@ -191,8 +237,32 @@ def simulate_match(
         opponent_rest_days=home_rest_days,
     )
 
-    home_goals = int(rng.poisson(home_lambda))
-    away_goals = int(rng.poisson(away_lambda))
+    score_engine = _poisson_score_engine(dixon_coles_rho)
+    sampled_outcome: str | None = None
+    outcome_home_win_pct: float | None = None
+    outcome_draw_pct: float | None = None
+    outcome_away_win_pct: float | None = None
+    if outcome_probabilities is None:
+        home_goals, away_goals = _sample_score(
+            home_lambda,
+            away_lambda,
+            rng,
+            dixon_coles_rho=dixon_coles_rho,
+        )
+    else:
+        normalized_probabilities = _normalize_outcome_probabilities(outcome_probabilities)
+        sampled_outcome = _sample_outcome(normalized_probabilities, rng)
+        home_goals, away_goals = _sample_goals_for_outcome(
+            home_lambda,
+            away_lambda,
+            sampled_outcome,
+            rng,
+            dixon_coles_rho=dixon_coles_rho,
+        )
+        score_engine = _outcome_hybrid_score_engine(dixon_coles_rho)
+        outcome_home_win_pct = 100.0 * normalized_probabilities[0]
+        outcome_draw_pct = 100.0 * normalized_probabilities[1]
+        outcome_away_win_pct = 100.0 * normalized_probabilities[2]
 
     decided_by_penalties = False
     penalty_winner_team_id: str | None = None
@@ -240,6 +310,11 @@ def simulate_match(
         away_rest_days=away_rest_days,
         home_advantage=home_advantage,
         away_advantage=away_advantage,
+        score_engine=score_engine,
+        sampled_outcome=sampled_outcome,
+        outcome_home_win_pct=outcome_home_win_pct,
+        outcome_draw_pct=outcome_draw_pct,
+        outcome_away_win_pct=outcome_away_win_pct,
         created_at=datetime.now(UTC),
     )
 
@@ -252,6 +327,8 @@ def simulate_world_cup(
     db_path: Path = DB_PATH,
     seed: int | None = None,
     fixtures: Sequence[WorldCupFixture] | None = None,
+    outcome_model_context: OutcomeModelContext | None = None,
+    dixon_coles_rho: float = DEFAULT_DIXON_COLES_RHO,
 ) -> None:
     """Run a Monte Carlo simulation for the FIFA World Cup 2026 schedule."""
     logging.basicConfig(
@@ -262,6 +339,7 @@ def simulate_world_cup(
         raise ValueError("iterations must be greater than zero.")
     if batch_size <= 0:
         raise ValueError("batch_size must be greater than zero.")
+    _validate_dixon_coles_rho(dixon_coles_rho)
 
     tournament_fixtures = tuple(fixtures or world_cup_2026_fixtures())
     _validate_tournament_shape(tournament_fixtures)
@@ -276,6 +354,7 @@ def simulate_world_cup(
         iterations,
         len(tournament_fixtures),
     )
+    LOGGER.info("Using Dixon-Coles rho %.3f for score sampling.", dixon_coles_rho)
 
     with duckdb.connect(str(db_path)) as con:
         con.execute("DELETE FROM simulated_results")
@@ -287,6 +366,8 @@ def simulate_world_cup(
                 tournament_fixtures,
                 simulation_id,
                 rng,
+                outcome_model_context=outcome_model_context,
+                dixon_coles_rho=dixon_coles_rho,
             )
             buffer.extend(tournament_rows)
             if _should_log_simulation_progress(simulation_id, iterations, progress_interval):
@@ -326,6 +407,9 @@ def _simulate_tournament(
     fixtures: Sequence[WorldCupFixture],
     simulation_id: int,
     rng: np.random.Generator,
+    *,
+    outcome_model_context: OutcomeModelContext | None,
+    dixon_coles_rho: float,
 ) -> list[tuple[object, ...]]:
     """Simulate one complete World Cup and return rows to persist."""
     rows: list[tuple[object, ...]] = []
@@ -345,6 +429,8 @@ def _simulate_tournament(
             rng,
             last_played_at,
             require_winner=False,
+            outcome_model_context=outcome_model_context,
+            dixon_coles_rho=dixon_coles_rho,
         )
         _apply_group_result(group_standings, fixture, result, rng)
         group_match_results.append(_group_match_result(fixture, result))
@@ -364,6 +450,8 @@ def _simulate_tournament(
             rng,
             last_played_at,
             require_winner=True,
+            outcome_model_context=outcome_model_context,
+            dixon_coles_rho=dixon_coles_rho,
         )
         match_results[fixture.match_number] = result
         rows.append(_row_tuple(result))
@@ -380,6 +468,8 @@ def _play_fixture(
     last_played_at: dict[str, datetime],
     *,
     require_winner: bool,
+    outcome_model_context: OutcomeModelContext | None,
+    dixon_coles_rho: float,
 ) -> SimulatedMatch:
     home_rest_days = _rest_days(last_played_at.get(home_team.team_id), fixture.match_date)
     away_rest_days = _rest_days(last_played_at.get(away_team.team_id), fixture.match_date)
@@ -391,6 +481,12 @@ def _play_fixture(
         venue_country=fixture.country,
         home_rest_days=home_rest_days,
         away_rest_days=away_rest_days,
+        outcome_probabilities=_match_outcome_probabilities(
+            outcome_model_context,
+            home_team.team_id,
+            away_team.team_id,
+        ),
+        dixon_coles_rho=dixon_coles_rho,
     )
     result = _with_fixture_metadata(result, fixture, simulation_id)
     last_played_at[home_team.team_id] = fixture.match_date
@@ -429,6 +525,11 @@ def _with_fixture_metadata(
         away_rest_days=result.away_rest_days,
         home_advantage=result.home_advantage,
         away_advantage=result.away_advantage,
+        score_engine=result.score_engine,
+        sampled_outcome=result.sampled_outcome,
+        outcome_home_win_pct=result.outcome_home_win_pct,
+        outcome_draw_pct=result.outcome_draw_pct,
+        outcome_away_win_pct=result.outcome_away_win_pct,
         created_at=result.created_at,
     )
 
@@ -723,6 +824,11 @@ def _row_tuple(result: SimulatedMatch) -> tuple[object, ...]:
         result.away_rest_days,
         result.home_advantage,
         result.away_advantage,
+        result.score_engine,
+        result.sampled_outcome,
+        result.outcome_home_win_pct,
+        result.outcome_draw_pct,
+        result.outcome_away_win_pct,
         result.created_at,
     )
 
@@ -757,8 +863,18 @@ def _flush_rows(con: duckdb.DuckDBPyConnection, rows: list[tuple[object, ...]]) 
             away_rest_days,
             home_advantage,
             away_advantage,
+            score_engine,
+            sampled_outcome,
+            outcome_home_win_pct,
+            outcome_draw_pct,
+            outcome_away_win_pct,
             created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?
+        )
         """,
         rows,
     )
@@ -776,6 +892,11 @@ def _migrate_simulated_results(con: duckdb.DuckDBPyConnection) -> None:
         "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS away_rest_days DOUBLE",
         "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS home_advantage BOOLEAN",
         "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS away_advantage BOOLEAN",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS score_engine VARCHAR",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS sampled_outcome VARCHAR",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS outcome_home_win_pct DOUBLE",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS outcome_draw_pct DOUBLE",
+        "ALTER TABLE simulated_results ADD COLUMN IF NOT EXISTS outcome_away_win_pct DOUBLE",
     )
     for statement in migration_statements:
         con.execute(statement)
@@ -920,6 +1041,181 @@ def _resolve_penalties(
     return home_team_id if int(rng.integers(0, 2)) == 0 else away_team_id
 
 
+def _match_outcome_probabilities(
+    outcome_model_context: OutcomeModelContext | None,
+    home_team_id: str,
+    away_team_id: str,
+) -> tuple[float, float, float] | None:
+    if outcome_model_context is None:
+        return None
+    try:
+        probabilities = predict_match_probabilities(
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            team_features=outcome_model_context.team_features,
+            model=outcome_model_context.model,
+            calibration_temperature=outcome_model_context.calibration_temperature,
+        )
+    except KeyError:
+        return None
+    return tuple(float(probability) for probability in probabilities)
+
+
+def _normalize_outcome_probabilities(
+    probabilities: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    clipped = np.clip(np.asarray(probabilities, dtype=float), 0.0, 1.0)
+    total = float(clipped.sum())
+    if total <= 0.0:
+        return (1 / 3, 1 / 3, 1 / 3)
+    normalized = clipped / total
+    return (float(normalized[0]), float(normalized[1]), float(normalized[2]))
+
+
+def _sample_outcome(
+    probabilities: tuple[float, float, float],
+    rng: np.random.Generator,
+) -> str:
+    index = int(rng.choice(3, p=np.asarray(probabilities, dtype=float)))
+    return ("home", "draw", "away")[index]
+
+
+def _sample_goals_for_outcome(
+    home_lambda: float,
+    away_lambda: float,
+    sampled_outcome: str,
+    rng: np.random.Generator,
+    *,
+    dixon_coles_rho: float,
+) -> tuple[int, int]:
+    for _ in range(MAX_CONDITIONAL_SCORE_ATTEMPTS):
+        home_goals, away_goals = _sample_score(
+            home_lambda,
+            away_lambda,
+            rng,
+            dixon_coles_rho=dixon_coles_rho,
+        )
+        if _score_matches_outcome(home_goals, away_goals, sampled_outcome):
+            return home_goals, away_goals
+    return _fallback_score_for_outcome(home_lambda, away_lambda, sampled_outcome, rng)
+
+
+def _score_matches_outcome(home_goals: int, away_goals: int, sampled_outcome: str) -> bool:
+    if sampled_outcome == "home":
+        return home_goals > away_goals
+    if sampled_outcome == "away":
+        return away_goals > home_goals
+    return home_goals == away_goals
+
+
+def _fallback_score_for_outcome(
+    home_lambda: float,
+    away_lambda: float,
+    sampled_outcome: str,
+    rng: np.random.Generator,
+) -> tuple[int, int]:
+    if sampled_outcome == "draw":
+        draw_lambda = max((home_lambda + away_lambda) / 2.0, 0.0)
+        goals = int(rng.poisson(draw_lambda))
+        return goals, goals
+
+    if sampled_outcome == "home":
+        away_goals = int(rng.poisson(max(away_lambda, 0.0)))
+        margin_lambda = max(home_lambda - away_lambda, 0.35)
+        return away_goals + 1 + int(rng.poisson(margin_lambda)), away_goals
+
+    home_goals = int(rng.poisson(max(home_lambda, 0.0)))
+    margin_lambda = max(away_lambda - home_lambda, 0.35)
+    return home_goals, home_goals + 1 + int(rng.poisson(margin_lambda))
+
+
+def _sample_score(
+    home_lambda: float,
+    away_lambda: float,
+    rng: np.random.Generator,
+    *,
+    dixon_coles_rho: float,
+) -> tuple[int, int]:
+    if math.isclose(dixon_coles_rho, 0.0, abs_tol=1e-12):
+        return (
+            int(rng.poisson(max(home_lambda, 0.0))),
+            int(rng.poisson(max(away_lambda, 0.0))),
+        )
+    return _sample_dixon_coles_score(home_lambda, away_lambda, rng, rho=dixon_coles_rho)
+
+
+def _sample_dixon_coles_score(
+    home_lambda: float,
+    away_lambda: float,
+    rng: np.random.Generator,
+    *,
+    rho: float,
+) -> tuple[int, int]:
+    home_rate = max(float(home_lambda), 0.0)
+    away_rate = max(float(away_lambda), 0.0)
+    tau_upper_bound = _dixon_coles_tau_upper_bound(home_rate, away_rate, rho)
+
+    for _ in range(MAX_DIXON_COLES_SCORE_ATTEMPTS):
+        home_goals = int(rng.poisson(home_rate))
+        away_goals = int(rng.poisson(away_rate))
+        tau = _dixon_coles_tau(home_goals, away_goals, home_rate, away_rate, rho)
+        if tau > 0.0 and float(rng.random()) <= tau / tau_upper_bound:
+            return home_goals, away_goals
+
+    return int(rng.poisson(home_rate)), int(rng.poisson(away_rate))
+
+
+def _dixon_coles_tau(
+    home_goals: int,
+    away_goals: int,
+    home_lambda: float,
+    away_lambda: float,
+    rho: float,
+) -> float:
+    if home_goals == 0 and away_goals == 0:
+        return max(0.0, 1.0 - home_lambda * away_lambda * rho)
+    if home_goals == 0 and away_goals == 1:
+        return max(0.0, 1.0 + home_lambda * rho)
+    if home_goals == 1 and away_goals == 0:
+        return max(0.0, 1.0 + away_lambda * rho)
+    if home_goals == 1 and away_goals == 1:
+        return max(0.0, 1.0 - rho)
+    return 1.0
+
+
+def _dixon_coles_tau_upper_bound(home_lambda: float, away_lambda: float, rho: float) -> float:
+    candidates = [
+        1.0,
+        _dixon_coles_tau(0, 0, home_lambda, away_lambda, rho),
+    ]
+    if home_lambda > 0.0:
+        candidates.append(_dixon_coles_tau(1, 0, home_lambda, away_lambda, rho))
+    if away_lambda > 0.0:
+        candidates.append(_dixon_coles_tau(0, 1, home_lambda, away_lambda, rho))
+    if home_lambda > 0.0 and away_lambda > 0.0:
+        candidates.append(_dixon_coles_tau(1, 1, home_lambda, away_lambda, rho))
+    return max(candidates)
+
+
+def _validate_dixon_coles_rho(rho: float) -> None:
+    if not MIN_DIXON_COLES_RHO <= rho <= MAX_DIXON_COLES_RHO:
+        raise ValueError(
+            f"dixon_coles_rho must be between {MIN_DIXON_COLES_RHO} and {MAX_DIXON_COLES_RHO}."
+        )
+
+
+def _poisson_score_engine(dixon_coles_rho: float) -> str:
+    if math.isclose(dixon_coles_rho, 0.0, abs_tol=1e-12):
+        return POISSON_SCORE_ENGINE
+    return DIXON_COLES_POISSON_SCORE_ENGINE
+
+
+def _outcome_hybrid_score_engine(dixon_coles_rho: float) -> str:
+    if math.isclose(dixon_coles_rho, 0.0, abs_tol=1e-12):
+        return OUTCOME_HYBRID_SCORE_ENGINE
+    return DIXON_COLES_OUTCOME_HYBRID_SCORE_ENGINE
+
+
 def _adjust_lambda(
     lambda_goals: float,
     *,
@@ -993,6 +1289,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Export analytics CSVs after the simulation finishes.",
     )
+    parser.add_argument(
+        "--disable-outcome-model",
+        action="store_true",
+        help="Use the original Poisson-only score simulation even if the V/E/D model exists.",
+    )
+    parser.add_argument(
+        "--dixon-coles-rho",
+        type=float,
+        default=DEFAULT_DIXON_COLES_RHO,
+        help=(
+            "Low-score Dixon-Coles dependence parameter. Use 0.0 for independent "
+            "Poisson score sampling."
+        ),
+    )
     return parser
 
 
@@ -1004,6 +1314,8 @@ def run_simulation_from_project_data(
     batch_size: int = DEFAULT_BATCH_SIZE,
     seed: int | None = DEFAULT_SEED,
     export_reports: bool = False,
+    use_outcome_model: bool = True,
+    dixon_coles_rho: float = DEFAULT_DIXON_COLES_RHO,
 ) -> None:
     """Build team lambdas from the local warehouse/model and simulate the tournament."""
     if not db_path.exists():
@@ -1018,12 +1330,17 @@ def run_simulation_from_project_data(
 
     model = _load_poisson_model(model_path)
     team_lambdas = _build_world_cup_team_lambdas_from_project_data(db_path=db_path, model=model)
+    outcome_model_context = (
+        load_outcome_model_context(db_path=db_path) if use_outcome_model else None
+    )
     simulate_world_cup(
         team_lambdas,
         iterations=iterations,
         batch_size=batch_size,
         db_path=db_path,
         seed=seed,
+        outcome_model_context=outcome_model_context,
+        dixon_coles_rho=dixon_coles_rho,
     )
     if export_reports:
         export_analytics(db_path=db_path)
@@ -1033,6 +1350,30 @@ def _load_poisson_model(model_path: Path) -> xgb.XGBRegressor:
     model = xgb.XGBRegressor()
     model.load_model(str(model_path))
     return model
+
+
+def load_outcome_model_context(
+    *,
+    db_path: Path,
+    model_path: Path = OUTCOME_MODEL_PATH,
+    calibration_path: Path = OUTCOME_CALIBRATION_PATH,
+) -> OutcomeModelContext | None:
+    if not model_path.exists():
+        LOGGER.info("Outcome model not found at %s; using Poisson-only simulation.", model_path)
+        return None
+
+    outcome_model = load_outcome_model_artifact(model_path)
+    team_features = build_current_world_cup_team_features(db_path)
+    calibration_temperature = load_calibration_temperature(calibration_path)
+    LOGGER.info(
+        "Using calibrated V/E/D outcome model for hybrid score simulation (%d teams).",
+        len(team_features),
+    )
+    return OutcomeModelContext(
+        model=outcome_model,
+        team_features=team_features,
+        calibration_temperature=calibration_temperature,
+    )
 
 
 def _build_world_cup_team_lambdas_from_project_data(
@@ -1058,6 +1399,8 @@ def main() -> int:
         batch_size=args.batch_size,
         seed=args.seed,
         export_reports=args.export_analytics,
+        use_outcome_model=not args.disable_outcome_model,
+        dixon_coles_rho=args.dixon_coles_rho,
     )
     return 0
 
