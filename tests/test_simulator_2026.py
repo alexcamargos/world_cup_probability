@@ -7,9 +7,14 @@ import duckdb
 import numpy as np
 
 from src.simulator import (
+    DIXON_COLES_OUTCOME_HYBRID_SCORE_ENGINE,
+    DIXON_COLES_POISSON_SCORE_ENGINE,
+    POISSON_SCORE_ENGINE,
     GroupStanding,
+    OutcomeModelContext,
     TeamLambda,
     _apply_group_result,
+    _dixon_coles_tau,
     simulate_match,
     simulate_world_cup,
 )
@@ -97,3 +102,111 @@ def test_group_result_accumulates_fair_play_penalty_from_team_rate() -> None:
 
     assert standings["A"]["A"].fair_play_points == 0
     assert standings["A"]["B"].fair_play_points > 0
+
+
+def test_dixon_coles_tau_adjusts_low_score_dependence() -> None:
+    home_lambda = 1.4
+    away_lambda = 1.1
+    rho = -0.10
+
+    assert _dixon_coles_tau(0, 0, home_lambda, away_lambda, rho) > 1.0
+    assert _dixon_coles_tau(1, 1, home_lambda, away_lambda, rho) > 1.0
+    assert _dixon_coles_tau(0, 1, home_lambda, away_lambda, rho) < 1.0
+    assert _dixon_coles_tau(1, 0, home_lambda, away_lambda, rho) < 1.0
+    assert _dixon_coles_tau(2, 1, home_lambda, away_lambda, rho) == 1.0
+
+
+def test_simulate_match_can_use_legacy_independent_poisson_engine() -> None:
+    default_result = simulate_match(
+        TeamLambda("A", "A", 0.0),
+        TeamLambda("B", "B", 0.0),
+        require_winner=False,
+        rng=np.random.default_rng(7),
+    )
+    result = simulate_match(
+        TeamLambda("A", "A", 0.0),
+        TeamLambda("B", "B", 0.0),
+        require_winner=False,
+        rng=np.random.default_rng(7),
+        dixon_coles_rho=0.0,
+    )
+
+    assert default_result.score_engine == DIXON_COLES_POISSON_SCORE_ENGINE
+    assert result.score_engine == POISSON_SCORE_ENGINE
+
+
+def test_simulate_match_conditions_score_on_sampled_outcome() -> None:
+    result = simulate_match(
+        TeamLambda("A", "A", 0.0),
+        TeamLambda("B", "B", 0.0),
+        require_winner=False,
+        rng=np.random.default_rng(7),
+        outcome_probabilities=(1.0, 0.0, 0.0),
+    )
+
+    assert result.score_engine == DIXON_COLES_OUTCOME_HYBRID_SCORE_ENGINE
+    assert result.sampled_outcome == "home"
+    assert result.home_goals > result.away_goals
+    assert result.outcome_home_win_pct == 100.0
+
+
+def test_simulate_world_cup_persists_outcome_hybrid_engine(tmp_path: Path) -> None:
+    class AlwaysHomeOutcomeModel:
+        def predict_proba(self, matrix: np.ndarray) -> np.ndarray:
+            return np.tile(np.array([[1.0, 0.0, 0.0]]), (matrix.shape[0], 1))
+
+    db_path = tmp_path / "world_cup.duckdb"
+    teams = [
+        TeamLambda(
+            team_id=code,
+            team_name=name,
+            lambda_goals=0.0,
+            country_code=TEAM_COUNTRIES.get(code, code),
+        )
+        for code, name in TEAM_NAMES.items()
+    ]
+    feature_defaults = {
+        "world_cup_probability_elo": 1500.0,
+        "world_football_elo_ratings": 1500.0,
+        "fifa_world_ranking_points": 1500.0,
+        "fifa_world_ranking_rank": 0.0,
+        "prior_world_cup_appearances": 0.0,
+        "prior_world_cup_points_per_match": 0.0,
+        "prior_world_cup_goal_diff_per_match": 0.0,
+        "prior_world_cup_yellow_cards_per_match": 0.0,
+        "prior_world_cup_sending_offs_per_match": 0.0,
+        "prior_world_cup_fair_play_penalty_per_match": 0.0,
+        "market_value": 0.0,
+        "avg_overall": 0.0,
+        "avg_pace": 0.0,
+        "avg_stamina": 0.0,
+        "squad_depth_proxy": 0.0,
+        "recent_form": 0.0,
+    }
+    context = OutcomeModelContext(
+        model=AlwaysHomeOutcomeModel(),  # type: ignore[arg-type]
+        team_features={code: dict(feature_defaults) for code in TEAM_NAMES},
+    )
+
+    simulate_world_cup(
+        teams,
+        iterations=1,
+        batch_size=128,
+        db_path=db_path,
+        seed=7,
+        outcome_model_context=context,
+    )
+
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        row = con.execute(
+            """
+            SELECT score_engine, sampled_outcome, outcome_home_win_pct, home_goals, away_goals
+            FROM simulated_results
+            WHERE match_number = 1
+            """
+        ).fetchone()
+
+    assert row[0] == DIXON_COLES_OUTCOME_HYBRID_SCORE_ENGINE
+    assert row[1] == "home"
+    assert row[2] == 100.0
+    assert row[3] > row[4]
