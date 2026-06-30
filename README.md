@@ -1,181 +1,122 @@
 # World Cup Probability
 
-Base do repositório para modelagem de probabilidades da Copa do Mundo.
+Projeto Python para estimar probabilidades da Copa do Mundo de 2026 a partir de
+dados históricos de seleções, rankings, ratings Elo, atributos de elenco e
+simulações Monte Carlo.
 
-## Execução do pipeline
+O repositório organiza um pipeline local que baixa e carrega dados, constrói
+features, treina modelos, simula o torneio oficial de 2026 e publica resultados
+em um dashboard Streamlit.
 
-Ordem recomendada:
+## O que o projeto entrega
 
-1. Baixar os dados brutos para `data/raw`:
-   - `uv run download-data`
-   - `uv run download-data --sources matches`
-   - `uv run download-data --sources matches squad --ea-fc-dataset flynn28/eafc26-player-database`
-   - `uv run download-data --sources fbref --fbref-leagues <league> --fbref-seasons <season>`
-   - `uv run download-data --sources transfermarkt --transfermarkt-manifest data/raw/transfermarkt/teams.json`
-   - `uv run download-data --sources fjelstul`
-   - Para baixar todas as fontes configuradas numa chamada:
-     `uv run download-data --ea-fc-dataset flynn28/eafc26-player-database --fbref-leagues <league> --fbref-seasons <season> --transfermarkt-manifest data/raw/transfermarkt/teams.json`
-2. Carregar os dados brutos no warehouse DuckDB:
-   - `uv run load-data`
-   - `uv run load-data --sources matches`
-   - `uv run load-data --sources matches squad --ea-fc-dataset flynn28/eafc26-player-database`
-   - `uv run load-data --sources fbref`
-   - `uv run load-data --sources transfermarkt`
-   - `uv run load-data --sources fjelstul`
-   - Para carregar todas as fontes já baixadas numa chamada:
-     `uv run load-data --ea-fc-dataset flynn28/eafc26-player-database`
-3. Coletar e carregar em um único comando, quando for conveniente:
-   - `uv run collection --sources matches`
-   - `uv run collection --sources matches --load-existing`
-4. Inicializar o warehouse e carregar dados brutos:
-   - `uv run db-init`
-5. Calcular o histórico World Cup Probability Elo:
-   - `uv run world-cup-probability-elo`
-6. Carregar o World Football Elo Ratings:
-   - `uv run world-football-elo-ratings`
-   - Para recarregar um snapshot local sem rede:
-     `uv run world-football-elo-ratings --load-existing --raw-path data/raw/eloratings/world_football_elo_ratings_snapshot.jsonl`
-7. Carregar o FIFA World Ranking:
-   - `uv run fifa-world-ranking`
-   - Para recarregar um snapshot local sem rede:
-     `uv run fifa-world-ranking --load-existing --raw-path data/raw/fifa_world_ranking/men_snapshot.jsonl`
-8. Gerar a base de features:
-   - `uv run features`
-9. Treinar o modelo Poisson e gerar SHAP:
-   - `uv run train-model`
-10. Treinar o modelo categórico de resultado (vitória do time 1, empate,
-    vitória do time 2) e comparar com baseline aleatório uniforme:
-   - `uv run train-outcome-model`
-11. Rodar a simulação Monte Carlo:
-   - `uv run simulate`
-   - Exemplo reproduzível e menor para validação local:
-     `uv run simulate --iterations 1000 --batch-size 250 --seed 42`
-   - Para exportar os CSVs analíticos na mesma execução:
-     `uv run simulate --iterations 100000 --batch-size 2500 --export-analytics`
-12. Gerar as análises e CSVs:
-   - `uv run analytics`
-13. Orquestrar tudo em sequência:
-   - `uv run pipeline --iterations 100000 --batch-size 2500`
-14. Abrir a interface web Streamlit:
-   - `uv run dashboard`
-   - Alternativamente: `uv run streamlit run src/app.py`
+- Warehouse analítico local em DuckDB.
+- Histórico Elo próprio do projeto, calculado sobre partidas internacionais.
+- Integração com snapshots de World Football Elo Ratings e FIFA World Ranking.
+- Features de forma recente, força relativa, histórico de Copa e atributos de
+  elenco.
+- Modelo XGBoost Poisson para intensidade de gols.
+- Modelo XGBoost categórico para vitória, empate ou derrota.
+- Simulação Monte Carlo da Copa de 2026 com fase de grupos, terceiros colocados,
+  mata-mata, disputa de terceiro lugar e final.
+- Exportação de CSVs analíticos e dashboard Streamlit para explorar previsões e
+  avaliar jogos reais conforme placares forem preenchidos.
 
-A interface web lê `data/warehouse/world_cup.duckdb`, permite selecionar a
-rodada da Copa e apresenta as probabilidades agregadas de vitória do Time 1,
-empate e vitória do Time 2 em uma tabela no formato do relatório. Para fases
-eliminatórias, os confrontos podem variar entre simulações; por padrão, a tela
-mostra o confronto mais frequente de cada jogo, com opção para exibir todos.
+## Estrutura
 
-Por regra de negócio, a coleta histórica carrega apenas partidas em ou após
-`2010-01-01`. O valor pode ser alterado manualmente com `--cutoff-date`.
-
-O valor de `--ea-fc-dataset` deve ser um slug real do Kaggle, no formato
-`owner/dataset`, copiado da URL depois de `/datasets/`. Exemplos de datasets
-compatíveis para atributos de jogadores são `flynn28/eafc26-player-database`,
-`aniss7/fifa-player-data-from-sofifa-2025-06-03` e
-`rehandl23/fifa-24-player-stats-dataset`. A disponibilidade depende da licença
-e visibilidade do dataset na sua conta Kaggle.
-
-Sem argumentos, `download-data` usa os defaults do projeto: baixa partidas
-históricas do Kaggle, baixa o dataset padrão de atributos EA FC/FIFA e tenta
-Transfermarkt apenas se houver `config/transfermarkt_teams.json`. FBref fica
-como fonte opcional explícita porque o site costuma bloquear coleta automatizada
-com HTTP 403.
-
-O comando `world-football-elo-ratings` baixa o snapshot global atual de
-[World Football Elo Ratings](https://www.eloratings.net/) a partir dos TSVs
-públicos do site (`World.tsv` e `en.teams.tsv`) e persiste as tabelas
-`d_world_football_elo_ratings` e `d_world_football_elo_team_aliases`. A feature
-`world_football_elo_ratings_diff` entra no treino junto com
-`world_cup_probability_elo_diff`; se o snapshot ainda não estiver carregado, a
-geração de features usa o World Cup Probability Elo como fallback para manter o
-pipeline executável.
-
-O comando `fifa-world-ranking` baixa o snapshot masculino atual do
-[FIFA World Ranking](https://inside.fifa.com/fifa-world-ranking/men), persiste
-as tabelas `d_fifa_world_ranking` e `d_fifa_world_ranking_team_aliases`, e
-mantém a data da última atualização oficial e da próxima atualização oficial no
-warehouse. Na página oficial consultada, a última atualização é 11 de junho de
-2026 e a próxima é 20 de julho de 2026. As features
-`fifa_world_ranking_points_diff` e `fifa_world_ranking_rank_diff` entram no
-treino junto com `world_cup_probability_elo_diff` e
-`world_football_elo_ratings_diff`; se o snapshot ainda não estiver carregado,
-a geração de features usa o World Cup Probability Elo como fallback para pontos
-e rank neutro para manter o pipeline executável.
-
-A fonte `fjelstul` baixa `matches.csv` e `bookings.csv` do projeto
-[The Fjelstul World Cup Database](https://github.com/jfjelstul/worldcup) e
-materializa `d_world_cup_prior_team_history` e
-`d_world_cup_prior_discipline_history`. Essas tabelas criam, por seleção e ano,
-apenas estatísticas de Copas masculinas anteriores ao ano analisado:
-participações anteriores, pontos por jogo, saldo de gols por jogo, cartões
-amarelos por jogo, expulsões por jogo e penalidade histórica de fair play por
-jogo. As features `prior_world_cup_appearances_diff`,
-`prior_world_cup_points_per_match_diff`,
-`prior_world_cup_goal_diff_per_match_diff`,
-`prior_world_cup_yellow_cards_per_match_diff`,
-`prior_world_cup_sending_offs_per_match_diff` e
-`prior_world_cup_fair_play_penalty_per_match_diff` entram no treino como
-diferenças entre as seleções. Se as tabelas ainda não existirem, essas features
-usam zero como fallback para manter o pipeline executável. A taxa histórica de
-penalidade de fair play também alimenta o simulador de fase de grupos, que
-sorteia pontos positivos de penalidade por jogo para aplicar o critério de fair
-play antes do sorteio.
-
-O comando `simulate` carrega `models/xgb_poisson_model.json`, lê o warehouse
-`data/warehouse/world_cup.duckdb`, monta as intensidades de gols das 48
-seleções oficiais da Copa de 2026 a partir das features do projeto e executa a
-tabela real do torneio: 12 grupos de 4, 72 jogos de fase de grupos, melhores
-oito terceiros colocados, fase de 32 avos, oitavas, quartas, semifinais, disputa
-de terceiro lugar e final. A agenda real é o alvo da simulação; placares reais
-da Copa de 2026 não são usados no treino, no Elo, nas features, na forma recente
-ou como resultado preservado pelo simulador.
-
-Os manifestos padrão ficam em:
-
-- `config/fbref_sources.json`
-- `config/transfermarkt_teams.json`
-
-No manifesto do Transfermarkt, `url` é opcional. Quando ela não é informada, o
-download tenta resolver a página da seleção pela busca do Transfermarkt usando
-`team_name` ou `search_query`.
-
-Manifesto Transfermarkt esperado:
-
-```json
-{
-  "teams": [
-    {
-      "team_id": "Brazil",
-      "team_name": "Brazil",
-      "url": "https://www.transfermarkt.com/..."
-    }
-  ]
-}
+```text
+config/      Manifestos de fontes opcionais, como FBref e Transfermarkt.
+data/        Dados brutos e warehouse DuckDB local.
+docs/        Documentação técnica e guia de execução.
+models/      Modelos treinados e métricas geradas pelo pipeline.
+reports/     Figuras, CSVs analíticos e artefatos de relatório.
+src/         Código do pipeline, modelos, simulação e dashboard.
+tests/       Testes automatizados.
 ```
 
-## Saídas principais
+## Fluxo de dados
 
-- `data/warehouse/world_cup.duckdb`: fonte analítica local
-- `models/xgb_poisson_model.json`: modelo treinado
-- `models/xgb_outcome_model.json`: modelo categórico treinado para V/E/D
-- `models/xgb_outcome_metrics.json`: validação temporal contra baseline aleatório
-- `reports/figures/xgb_poisson_beeswarm.png`: interpretação SHAP
-- `reports/analytics/*.csv`: resumos analíticos da simulação
+```mermaid
+flowchart LR
+    A["Fontes externas"] --> B["data/raw"]
+    B --> C["DuckDB warehouse"]
+    C --> D["Features"]
+    D --> E["Modelos"]
+    E --> F["Simulação Monte Carlo"]
+    F --> G["CSVs analíticos"]
+    F --> H["Dashboard Streamlit"]
+```
 
-## Documentação técnica
+## Principais fontes
 
-- [01_modelo_elo](docs/01_modelo_elo.md)
-- [02_schema_duckdb](docs/02_schema_duckdb.md)
-- [03_poisson_dist](docs/03_poisson_dist.md)
+- Kaggle: partidas internacionais e atributos de jogadores/elencos.
+- FBref: estatísticas opcionais por liga e temporada.
+- Transfermarkt: valores de mercado por seleção a partir de manifesto local.
+- The Fjelstul World Cup Database: histórico de Copas e disciplina.
+- World Football Elo Ratings: snapshot global atual.
+- FIFA World Ranking: snapshot masculino atual.
 
-## Qualidade de código
+As fontes de rede podem exigir credenciais, licença aceita previamente ou
+disponibilidade do site no momento da coleta. O projeto mantém fallbacks para que
+algumas features opcionais não impeçam a execução quando uma fonte ainda não foi
+carregada.
 
-- Instale os hooks com `pre-commit install` e `pre-commit install --hook-type pre-push`
-- Os commits passam por `ruff format` e `ruff check --fix`
-- SQLs em `src/sql` podem ser validados com `uv run sqlfluff lint src/sql`
-- SQLs em `src/sql` podem ser formatados com `uv run sqlfluff fix src/sql`
-- O `pytest` roda no `pre-push`
+## Como rodar
 
+Use Python 3.12 e `uv`.
 
+```powershell
+uv sync
+uv run pytest
+```
 
+O guia completo de execução fica em [docs/como_rodar.md](docs/como_rodar.md). Ele
+mostra a ordem recomendada do pipeline e como executar cada comando publicado no
+`pyproject.toml`.
+
+Atalho para uma execução local pequena, assumindo dados brutos já disponíveis:
+
+```powershell
+uv run load-data
+uv run pipeline --iterations 1000 --batch-size 250 --seed 42
+uv run update-world-cup-results
+uv run dashboard
+```
+
+## Artefatos principais
+
+- `data/warehouse/world_cup.duckdb`: banco analítico local.
+- `models/xgb_poisson_model.json`: modelo de gols.
+- `models/xgb_outcome_model.json`: modelo de vitória, empate e derrota.
+- `models/xgb_outcome_metrics.json`: métricas de validação do modelo categórico.
+- `models/xgb_outcome_calibration.json`: calibração das probabilidades V/E/D.
+- `models/world_cup_2026_holdout_metrics.json`: avaliação de holdout da Copa de
+  2026 quando houver jogos pontuados.
+- `reports/figures/xgb_poisson_beeswarm.png`: explicabilidade SHAP do modelo de
+  gols.
+- `reports/analytics/*.csv`: resumos de semifinal, título e final mais provável.
+- `data/raw/fifa/world_cup_2026_results.json`: cache local dos placares reais
+  buscados pela ação `uv run update-world-cup-results` e pelo dashboard.
+
+## Documentação
+
+- [Como rodar o projeto](docs/como_rodar.md)
+- [Modelo Elo](docs/01_modelo_elo.md)
+- [Schema DuckDB](docs/02_schema_duckdb.md)
+- [Distribuição Poisson](docs/03_poisson_dist.md)
+
+## Qualidade
+
+```powershell
+uv run ruff format
+uv run ruff check --fix
+uv run sqlfluff lint src/sql
+uv run pytest
+```
+
+Hooks locais:
+
+```powershell
+uv run pre-commit install
+uv run pre-commit install --hook-type pre-push
+```
