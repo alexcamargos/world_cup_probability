@@ -10,6 +10,7 @@ import src.world_football_elo_ratings as world_football_elo_ratings
 from src.db_init import initialize_database
 from src.elo_engine import initialize_elo_history
 from src.feature_pipeline import build_feature_frame
+from src.model import FEATURE_COLUMNS
 from src.world_football_elo_ratings import (
     load_world_football_elo_ratings,
     parse_team_dictionary,
@@ -164,25 +165,7 @@ def test_world_football_elo_ratings_supports_feature_training_frame(tmp_path: Pa
 
     frame = build_feature_frame(db_path)
 
-    assert frame.columns == [
-        "world_cup_probability_elo_diff",
-        "world_football_elo_ratings_diff",
-        "fifa_world_ranking_points_diff",
-        "fifa_world_ranking_rank_diff",
-        "prior_world_cup_appearances_diff",
-        "prior_world_cup_points_per_match_diff",
-        "prior_world_cup_goal_diff_per_match_diff",
-        "prior_world_cup_yellow_cards_per_match_diff",
-        "prior_world_cup_sending_offs_per_match_diff",
-        "prior_world_cup_fair_play_penalty_per_match_diff",
-        "market_value_diff",
-        "avg_overall_diff",
-        "avg_pace_diff",
-        "avg_stamina_diff",
-        "squad_depth_proxy",
-        "recent_form_diff",
-        "target",
-    ]
+    assert frame.columns == [*FEATURE_COLUMNS, "target"]
     row = frame.row(0, named=True)
     assert row["world_cup_probability_elo_diff"] == pytest.approx(100.0)
     assert row["world_football_elo_ratings_diff"] == pytest.approx(-142.0)
