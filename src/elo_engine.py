@@ -115,6 +115,7 @@ def build_elo_history(
 
     with duckdb.connect(str(db_path)) as con:
         _ensure_matches_exist(con)
+        _delete_stale_elo_history(con)
         _delete_current_world_cup_history(con)
         matches = _load_matches(con)
         ratings: dict[str, float] = {}
@@ -180,6 +181,19 @@ def _delete_current_world_cup_history(con: duckdb.DuckDBPyConnection) -> None:
             SELECT match_id
             FROM f_matches
             WHERE NOT {current_world_cup_exclusion}
+        )
+        """,
+    )
+
+
+def _delete_stale_elo_history(con: duckdb.DuckDBPyConnection) -> None:
+    """Remove Elo rows for match IDs no longer present in the match fact table."""
+    con.execute(
+        """
+        DELETE FROM f_elo_history
+        WHERE match_id NOT IN (
+            SELECT match_id
+            FROM f_matches
         )
         """,
     )
