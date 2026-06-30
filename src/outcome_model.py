@@ -12,6 +12,7 @@ import argparse
 import logging
 import math
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ try:
     from .feature_pipeline import build_feature_frame
     from .model import (
         CURRENT_WORLD_CUP_COLUMN,
+        DEFAULT_OPTUNA_TRIALS,
         DEFAULT_VALIDATION_FRACTION,
         FEATURE_COLUMNS,
         MATCH_DATE_COLUMN,
@@ -34,6 +36,7 @@ except ImportError:  # pragma: no cover - supports direct script execution.
     from feature_pipeline import build_feature_frame
     from model import (
         CURRENT_WORLD_CUP_COLUMN,
+        DEFAULT_OPTUNA_TRIALS,
         DEFAULT_VALIDATION_FRACTION,
         FEATURE_COLUMNS,
         MATCH_DATE_COLUMN,
@@ -45,6 +48,8 @@ LOGGER = logging.getLogger(__name__)
 
 OUTCOME_MODEL_PATH = MODELS_DIR / "xgb_outcome_model.json"
 OUTCOME_METRICS_PATH = MODELS_DIR / "xgb_outcome_metrics.json"
+OUTCOME_CALIBRATION_PATH = MODELS_DIR / "xgb_outcome_calibration.json"
+BEST_OUTCOME_PARAMS_PATH = MODELS_DIR / "xgb_outcome_best_params.json"
 
 HOME_WIN_CLASS = 0
 DRAW_CLASS = 1
@@ -53,6 +58,26 @@ OUTCOME_CLASS_LABELS: tuple[str, ...] = ("home_win", "draw", "away_win")
 OUTCOME_CLASS_COUNT = len(OUTCOME_CLASS_LABELS)
 HOME_GOALS_COLUMN = "home_goals"
 AWAY_GOALS_COLUMN = "away_goals"
+DEFAULT_CALIBRATION_FRACTION = 0.15
+DEFAULT_RECENCY_HALF_LIFE_DAYS = 365.25 * 3.0
+MIN_TEMPORAL_SAMPLE_WEIGHT = 0.20
+MIN_TEMPERATURE = 0.25
+MAX_TEMPERATURE = 4.0
+
+COMPETITION_SAMPLE_WEIGHT_MULTIPLIERS: dict[str, float] = {
+    "World Cup": 2.5,
+    "World Cup Qualifier": 2.0,
+    "World Cup Qualifying": 2.0,
+    "Copa do Mundo": 2.5,
+    "Copa do Mundo Qualificatória": 2.0,
+    "Continental Championship": 1.7,
+    "Continental Cup": 1.7,
+    "Nations League": 1.3,
+    "Qualifier": 1.4,
+    "Friendly": 0.55,
+    "International Friendly": 0.55,
+    "Amistoso": 0.55,
+}
 
 DEFAULT_XGB_OUTCOME_PARAMS: dict[str, Any] = {
     "objective": "multi:softprob",
@@ -77,6 +102,24 @@ class OutcomeModelArtifacts:
 
     model_path: Path
     metrics_path: Path
+    calibration_path: Path
+    best_params_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeTemporalSplit:
+    """Chronological train/calibration/validation split for outcome modeling."""
+
+    X_train: np.ndarray
+    X_calibration: np.ndarray
+    X_valid: np.ndarray
+    y_train: np.ndarray
+    y_calibration: np.ndarray
+    y_valid: np.ndarray
+    feature_names: list[str]
+    train_frame: pl.DataFrame
+    calibration_frame: pl.DataFrame
+    valid_frame: pl.DataFrame
 
 
 def load_outcome_training_frame(db_path: Path | None = None) -> pl.DataFrame:
@@ -130,6 +173,55 @@ def prepare_outcome_matrices(
     return X_train, X_valid, y_train, y_valid, feature_names
 
 
+def prepare_temporal_outcome_splits(
+    frame: pl.DataFrame,
+    *,
+    validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
+    calibration_fraction: float = DEFAULT_CALIBRATION_FRACTION,
+) -> OutcomeTemporalSplit:
+    """Split historical rows into train, calibration, and validation windows."""
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be greater than 0 and less than 1.")
+    if not 0.0 < calibration_fraction < 1.0:
+        raise ValueError("calibration_fraction must be greater than 0 and less than 1.")
+    if validation_fraction + calibration_fraction >= 1.0:
+        raise ValueError("validation_fraction + calibration_fraction must be less than 1.")
+
+    frame = _historical_outcome_frame(frame)
+    if frame.height < 3:
+        raise RuntimeError(
+            "At least three historical rows are required for train/calibration/validation."
+        )
+
+    validation_size = max(1, int(round(frame.height * validation_fraction)))
+    calibration_size = max(1, int(round(frame.height * calibration_fraction)))
+    if validation_size + calibration_size >= frame.height:
+        validation_size = 1
+        calibration_size = 1
+    train_size = frame.height - validation_size - calibration_size
+
+    train_frame = frame.slice(0, train_size)
+    calibration_frame = frame.slice(train_size, calibration_size)
+    valid_frame = frame.slice(train_size + calibration_size, validation_size)
+
+    X_train, y_train, feature_names = prepare_full_outcome_matrix(train_frame)
+    X_calibration, y_calibration, _ = prepare_full_outcome_matrix(calibration_frame)
+    X_valid, y_valid, _ = prepare_full_outcome_matrix(valid_frame)
+
+    return OutcomeTemporalSplit(
+        X_train=X_train,
+        X_calibration=X_calibration,
+        X_valid=X_valid,
+        y_train=y_train,
+        y_calibration=y_calibration,
+        y_valid=y_valid,
+        feature_names=feature_names,
+        train_frame=train_frame,
+        calibration_frame=calibration_frame,
+        valid_frame=valid_frame,
+    )
+
+
 def prepare_full_outcome_matrix(frame: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Build feature and categorical target arrays from a match-level frame."""
     missing_columns = [
@@ -152,6 +244,7 @@ def train_outcome_model(
     y_valid: np.ndarray | None = None,
     *,
     params: dict[str, Any] | None = None,
+    sample_weight: np.ndarray | None = None,
 ) -> xgb.XGBClassifier:
     """Train a multiclass XGBoost model for home win/draw/away win."""
     missing_classes = set(range(OUTCOME_CLASS_COUNT)) - set(int(label) for label in y_train)
@@ -163,6 +256,8 @@ def train_outcome_model(
     model = xgb.XGBClassifier(**model_params)
 
     fit_kwargs: dict[str, Any] = {"verbose": False}
+    if sample_weight is not None:
+        fit_kwargs["sample_weight"] = sample_weight
     if X_valid is not None and y_valid is not None:
         fit_kwargs["eval_set"] = [(X_valid, y_valid)]
     model.fit(X_train, y_train, **fit_kwargs)
@@ -175,13 +270,16 @@ def evaluate_outcome_model(
     y_valid: np.ndarray,
     *,
     random_hit_probability: float = 1.0 / OUTCOME_CLASS_COUNT,
+    calibration_temperature: float | None = None,
 ) -> dict[str, float]:
     """Evaluate outcome predictions against a uniform random baseline."""
     if y_valid.size == 0:
         raise RuntimeError("Validation target is empty.")
 
-    predicted_labels = model.predict(X_valid).astype(int)
     probabilities = _clip_probabilities(model.predict_proba(X_valid))
+    if calibration_temperature is not None:
+        probabilities = apply_temperature_scaling(probabilities, calibration_temperature)
+    predicted_labels = np.argmax(probabilities, axis=1).astype(int)
 
     hits = int(np.sum(predicted_labels == y_valid))
     trials = int(y_valid.size)
@@ -197,6 +295,7 @@ def evaluate_outcome_model(
             log_loss(y_valid, probabilities, labels=list(range(OUTCOME_CLASS_COUNT)))
         ),
         "multiclass_brier_score": _multiclass_brier_score(y_valid, probabilities),
+        "expected_calibration_error": _expected_calibration_error(y_valid, probabilities),
         "uniform_random_accuracy": random_accuracy,
         "accuracy_lift_vs_uniform_random": accuracy - random_accuracy,
         "uniform_random_log_loss": float(math.log(OUTCOME_CLASS_COUNT)),
@@ -207,6 +306,79 @@ def evaluate_outcome_model(
             p=random_hit_probability,
         ),
     }
+
+
+def outcome_sample_weights(
+    frame: pl.DataFrame,
+    *,
+    recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
+    min_temporal_weight: float = MIN_TEMPORAL_SAMPLE_WEIGHT,
+) -> np.ndarray:
+    """Build normalized sample weights from recency and competition importance."""
+    if frame.height == 0:
+        raise RuntimeError("Cannot build sample weights from an empty frame.")
+    if recency_half_life_days <= 0:
+        raise ValueError("recency_half_life_days must be greater than zero.")
+    if not 0.0 < min_temporal_weight <= 1.0:
+        raise ValueError("min_temporal_weight must be greater than 0 and at most 1.")
+    if MATCH_DATE_COLUMN not in frame.columns:
+        raise RuntimeError(f"Frame is missing column: {MATCH_DATE_COLUMN}")
+
+    competition_expr = (
+        pl.col("competition")
+        if "competition" in frame.columns
+        else pl.lit(None).alias("competition")
+    )
+    rows = frame.select([pl.col(MATCH_DATE_COLUMN), competition_expr]).to_dicts()
+    max_match_date = max(_coerce_date(row[MATCH_DATE_COLUMN]) for row in rows)
+
+    weights: list[float] = []
+    for row in rows:
+        match_date = _coerce_date(row[MATCH_DATE_COLUMN])
+        age_days = max(0, (max_match_date - match_date).days)
+        temporal_weight = max(
+            min_temporal_weight,
+            math.pow(0.5, age_days / recency_half_life_days),
+        )
+        weights.append(temporal_weight * _competition_sample_weight(row.get("competition")))
+
+    sample_weights = np.asarray(weights, dtype=float)
+    mean_weight = float(sample_weights.mean())
+    if mean_weight <= 0.0:
+        raise RuntimeError("Outcome sample weights must have a positive mean.")
+    return sample_weights / mean_weight
+
+
+def calibrate_temperature(probabilities: np.ndarray, labels: np.ndarray) -> float:
+    """Fit one multiclass temperature parameter by minimizing calibration log loss."""
+    probabilities = _clip_probabilities(probabilities)
+    if labels.size == 0:
+        raise RuntimeError("Calibration target is empty.")
+
+    low = math.log(MIN_TEMPERATURE)
+    high = math.log(MAX_TEMPERATURE)
+    for _ in range(80):
+        left = low + (high - low) / 3.0
+        right = high - (high - low) / 3.0
+        left_loss = _temperature_log_loss(probabilities, labels, math.exp(left))
+        right_loss = _temperature_log_loss(probabilities, labels, math.exp(right))
+        if left_loss < right_loss:
+            high = right
+        else:
+            low = left
+
+    return float(math.exp((low + high) / 2.0))
+
+
+def apply_temperature_scaling(probabilities: np.ndarray, temperature: float) -> np.ndarray:
+    """Apply scalar temperature scaling to multiclass probabilities."""
+    if temperature <= 0.0:
+        raise ValueError("temperature must be greater than zero.")
+    probabilities = _clip_probabilities(probabilities)
+    logits = np.log(probabilities) / temperature
+    logits -= logits.max(axis=1, keepdims=True)
+    scaled = np.exp(logits)
+    return scaled / scaled.sum(axis=1, keepdims=True)
 
 
 def save_outcome_model(model: xgb.XGBClassifier, output_path: Path = OUTCOME_MODEL_PATH) -> Path:
@@ -225,10 +397,86 @@ def outcome_class_distribution(labels: np.ndarray) -> dict[str, int]:
     }
 
 
+def tune_outcome_hyperparameters(
+    frame: pl.DataFrame,
+    *,
+    n_trials: int = DEFAULT_OPTUNA_TRIALS,
+    validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
+    calibration_fraction: float = DEFAULT_CALIBRATION_FRACTION,
+    recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
+    timeout_seconds: int | None = None,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Use Optuna on a temporal calibration split without exposing validation rows."""
+    if n_trials <= 0:
+        raise ValueError("n_trials must be greater than zero.")
+
+    try:
+        import optuna
+    except ImportError as exc:  # pragma: no cover - covered by dependency metadata.
+        raise RuntimeError("Optuna is not installed. Run `uv sync` and try again.") from exc
+
+    split = prepare_temporal_outcome_splits(
+        frame,
+        validation_fraction=validation_fraction,
+        calibration_fraction=calibration_fraction,
+    )
+    train_weights = outcome_sample_weights(
+        split.train_frame,
+        recency_half_life_days=recency_half_life_days,
+    )
+
+    def objective(trial: optuna.Trial) -> float:
+        trial_params = {
+            "n_estimators": trial.suggest_int("n_estimators", 200, 1200),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
+            "max_depth": trial.suggest_int("max_depth", 2, 8),
+            "min_child_weight": trial.suggest_float("min_child_weight", 0.5, 10.0, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 20.0, log=True),
+            "gamma": trial.suggest_float("gamma", 1e-8, 5.0, log=True),
+        }
+        model = train_outcome_model(
+            split.X_train,
+            split.y_train,
+            split.X_calibration,
+            split.y_calibration,
+            params=trial_params,
+            sample_weight=train_weights,
+        )
+        probabilities = _clip_probabilities(model.predict_proba(split.X_calibration))
+        return float(
+            log_loss(
+                split.y_calibration,
+                probabilities,
+                labels=list(range(OUTCOME_CLASS_COUNT)),
+            )
+        )
+
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=seed),
+    )
+    study.optimize(objective, n_trials=n_trials, timeout=timeout_seconds)
+    LOGGER.info(
+        "Best Optuna trial - outcome log loss: %.4f | params: %s",
+        study.best_value,
+        study.best_params,
+    )
+    return dict(study.best_params)
+
+
 def train_outcome_pipeline(
     db_path: Path | None = None,
     *,
+    tune: bool = False,
+    optuna_trials: int = DEFAULT_OPTUNA_TRIALS,
+    optuna_timeout_seconds: int | None = None,
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
+    calibration_fraction: float = DEFAULT_CALIBRATION_FRACTION,
+    recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
 ) -> OutcomeModelArtifacts:
     """Run training, temporal validation, and artifact persistence."""
     logging.basicConfig(
@@ -239,33 +487,105 @@ def train_outcome_pipeline(
     frame = load_outcome_training_frame(db_path)
     LOGGER.info("Loaded outcome training frame with shape %s", frame.shape)
 
-    X_train, X_valid, y_train, y_valid, _ = prepare_outcome_matrices(
+    best_params: dict[str, Any] = {}
+    best_params_path = None
+    if tune:
+        best_params = tune_outcome_hyperparameters(
+            frame,
+            n_trials=optuna_trials,
+            timeout_seconds=optuna_timeout_seconds,
+            validation_fraction=validation_fraction,
+            calibration_fraction=calibration_fraction,
+            recency_half_life_days=recency_half_life_days,
+        )
+        best_params_path = save_json_artifact(best_params, BEST_OUTCOME_PARAMS_PATH)
+        LOGGER.info("Best outcome Optuna params saved to %s", best_params_path)
+
+    split = prepare_temporal_outcome_splits(
         frame,
         validation_fraction=validation_fraction,
+        calibration_fraction=calibration_fraction,
     )
-    validation_model = train_outcome_model(X_train, y_train, X_valid, y_valid)
-    metrics = evaluate_outcome_model(validation_model, X_valid, y_valid)
+    train_weights = outcome_sample_weights(
+        split.train_frame,
+        recency_half_life_days=recency_half_life_days,
+    )
+    validation_model = train_outcome_model(
+        split.X_train,
+        split.y_train,
+        split.X_calibration,
+        split.y_calibration,
+        params=best_params,
+        sample_weight=train_weights,
+    )
+    calibration_probabilities = validation_model.predict_proba(split.X_calibration)
+    calibration_temperature = calibrate_temperature(
+        calibration_probabilities,
+        split.y_calibration,
+    )
+    uncalibrated_metrics = evaluate_outcome_model(
+        validation_model,
+        split.X_valid,
+        split.y_valid,
+    )
+    metrics = evaluate_outcome_model(
+        validation_model,
+        split.X_valid,
+        split.y_valid,
+        calibration_temperature=calibration_temperature,
+    )
     metrics_payload = {
         **metrics,
-        "train_class_distribution": outcome_class_distribution(y_train),
-        "validation_class_distribution": outcome_class_distribution(y_valid),
+        "calibration_method": "temperature_scaling",
+        "calibration_temperature": calibration_temperature,
+        "uncalibrated_metrics": uncalibrated_metrics,
+        "recency_half_life_days": float(recency_half_life_days),
+        "min_temporal_sample_weight": float(MIN_TEMPORAL_SAMPLE_WEIGHT),
+        "train_rows": float(split.y_train.size),
+        "calibration_rows": float(split.y_calibration.size),
+        "validation_rows": float(split.y_valid.size),
+        "train_weight_min": float(train_weights.min()),
+        "train_weight_mean": float(train_weights.mean()),
+        "train_weight_max": float(train_weights.max()),
+        "train_class_distribution": outcome_class_distribution(split.y_train),
+        "calibration_class_distribution": outcome_class_distribution(split.y_calibration),
+        "validation_class_distribution": outcome_class_distribution(split.y_valid),
+        "tuned_with_optuna": bool(tune),
     }
     metrics_path = save_json_artifact(metrics_payload, OUTCOME_METRICS_PATH)
+    calibration_path = save_json_artifact(
+        {
+            "method": "temperature_scaling",
+            "temperature": calibration_temperature,
+            "calibration_rows": float(split.y_calibration.size),
+            "validation_rows_held_out": float(split.y_valid.size),
+            "recency_half_life_days": float(recency_half_life_days),
+        },
+        OUTCOME_CALIBRATION_PATH,
+    )
 
-    X_full, y_full, _ = prepare_full_outcome_matrix(frame)
-    final_model = train_outcome_model(X_full, y_full)
-    model_path = save_outcome_model(final_model)
+    model_path = save_outcome_model(validation_model)
 
     LOGGER.info(
-        "Outcome validation - accuracy: %.4f | random: %.4f | p-value: %.6g",
+        (
+            "Outcome validation - calibrated accuracy: %.4f | random: %.4f | "
+            "calibrated log loss: %.4f | p-value: %.6g"
+        ),
         metrics["accuracy"],
         metrics["uniform_random_accuracy"],
+        metrics["multiclass_log_loss"],
         metrics["binomial_p_value_vs_uniform_random"],
     )
     LOGGER.info("Outcome model saved to %s", model_path)
+    LOGGER.info("Outcome calibration saved to %s", calibration_path)
     LOGGER.info("Outcome metrics saved to %s", metrics_path)
 
-    return OutcomeModelArtifacts(model_path=model_path, metrics_path=metrics_path)
+    return OutcomeModelArtifacts(
+        model_path=model_path,
+        metrics_path=metrics_path,
+        calibration_path=calibration_path,
+        best_params_path=best_params_path,
+    )
 
 
 def _historical_outcome_frame(frame: pl.DataFrame) -> pl.DataFrame:
@@ -306,6 +626,67 @@ def _multiclass_brier_score(labels: np.ndarray, probabilities: np.ndarray) -> fl
     return float(np.mean(np.sum(np.square(probabilities - one_hot), axis=1)))
 
 
+def _expected_calibration_error(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    bins: int = 10,
+) -> float:
+    if bins <= 0:
+        raise ValueError("bins must be greater than zero.")
+    predicted_labels = np.argmax(probabilities, axis=1)
+    confidences = np.max(probabilities, axis=1)
+    correct = (predicted_labels == labels).astype(float)
+    error = 0.0
+    for bin_index in range(bins):
+        lower = bin_index / bins
+        upper = (bin_index + 1) / bins
+        if bin_index == bins - 1:
+            in_bin = (confidences >= lower) & (confidences <= upper)
+        else:
+            in_bin = (confidences >= lower) & (confidences < upper)
+        if not bool(np.any(in_bin)):
+            continue
+        bin_weight = float(np.mean(in_bin))
+        bin_accuracy = float(np.mean(correct[in_bin]))
+        bin_confidence = float(np.mean(confidences[in_bin]))
+        error += bin_weight * abs(bin_accuracy - bin_confidence)
+    return float(error)
+
+
+def _temperature_log_loss(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    temperature: float,
+) -> float:
+    calibrated_probabilities = apply_temperature_scaling(probabilities, temperature)
+    return float(
+        log_loss(
+            labels,
+            calibrated_probabilities,
+            labels=list(range(OUTCOME_CLASS_COUNT)),
+        )
+    )
+
+
+def _competition_sample_weight(competition: object) -> float:
+    if competition is None:
+        return 1.0
+    normalized = str(competition).casefold()
+    for label, weight in COMPETITION_SAMPLE_WEIGHT_MULTIPLIERS.items():
+        if label.casefold() in normalized:
+            return weight
+    return 1.0
+
+
+def _coerce_date(value: object) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return datetime.fromisoformat(str(value)).date()
+
+
 def _binomial_one_sided_p_value(*, successes: int, trials: int, p: float) -> float:
     """Return P[X >= successes] for X ~ Binomial(trials, p)."""
     if trials <= 0:
@@ -340,11 +721,36 @@ def build_parser() -> argparse.ArgumentParser:
     """Build CLI parser for the outcome model."""
     parser = argparse.ArgumentParser(description="Train a win/draw/loss outcome model.")
     parser.add_argument("--db-path", type=Path, default=None, help="DuckDB warehouse path.")
+    parser.add_argument("--tune", action="store_true", help="Tune XGBoost params with Optuna.")
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=DEFAULT_OPTUNA_TRIALS,
+        help="Number of Optuna trials when --tune is enabled.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=None,
+        help="Optional Optuna tuning timeout in seconds.",
+    )
     parser.add_argument(
         "--validation-fraction",
         type=float,
         default=DEFAULT_VALIDATION_FRACTION,
         help="Most recent historical fraction used for temporal validation.",
+    )
+    parser.add_argument(
+        "--calibration-fraction",
+        type=float,
+        default=DEFAULT_CALIBRATION_FRACTION,
+        help="Historical fraction before validation used for probability calibration.",
+    )
+    parser.add_argument(
+        "--recency-half-life-days",
+        type=float,
+        default=DEFAULT_RECENCY_HALF_LIFE_DAYS,
+        help="Half-life used by temporal sample weights.",
     )
     return parser
 
@@ -352,7 +758,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     """CLI entrypoint."""
     args = build_parser().parse_args()
-    train_outcome_pipeline(args.db_path, validation_fraction=args.validation_fraction)
+    train_outcome_pipeline(
+        args.db_path,
+        tune=args.tune,
+        optuna_trials=args.trials,
+        optuna_timeout_seconds=args.timeout_seconds,
+        validation_fraction=args.validation_fraction,
+        calibration_fraction=args.calibration_fraction,
+        recency_half_life_days=args.recency_half_life_days,
+    )
     return 0
 
 
