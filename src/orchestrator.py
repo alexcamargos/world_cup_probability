@@ -556,8 +556,8 @@ def _build_team_lambdas(
             else ""
         )
         match_history_exclusion = current_world_cup_exclusion_sql(
-            date_expr="match_date",
-            competition_expr="competition",
+            date_expr="f_matches.match_date",
+            competition_expr="f_matches.competition",
         )
         elo_history_exclusion = current_world_cup_exclusion_sql(
             date_expr="m.match_date",
