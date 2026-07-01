@@ -445,6 +445,7 @@ def test_match_prediction_cards_html_compares_prediction_with_actual_result() ->
     assert "2 x 0" in rendered
     assert "Acerto" in rendered
     assert "source-pill" in rendered
+    assert '\n    <article class="match-prediction-card"' not in rendered
 
 
 def test_match_prediction_cards_html_marks_pending_unplayed_match() -> None:
