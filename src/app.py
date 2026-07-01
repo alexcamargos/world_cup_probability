@@ -139,7 +139,7 @@ def main() -> None:
     st.set_page_config(
         page_title="Analise do Modelo - Copa 2026",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="auto",
     )
     _inject_styles()
 
