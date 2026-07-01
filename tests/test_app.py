@@ -26,7 +26,7 @@ from src.app import (
 from src.world_cup_2026_schedule import WorldCupFixture
 
 
-def test_load_round_probabilities_includes_modal_model_score(tmp_path: Path) -> None:
+def test_load_round_probabilities_uses_modal_score_for_favorite_outcome(tmp_path: Path) -> None:
     db_path = tmp_path / "world_cup.duckdb"
     with duckdb.connect(str(db_path)) as con:
         con.execute(
@@ -133,14 +133,125 @@ def test_load_round_probabilities_includes_modal_model_score(tmp_path: Path) -> 
     )
 
     assert len(rows) == 1
-    assert rows[0]["predicted_home_goals"] == 1
+    assert rows[0]["predicted_home_goals"] == 0
     assert rows[0]["predicted_away_goals"] == 0
-    assert rows[0]["score_occurrence_pct"] == 40.0
+    assert rows[0]["score_occurrence_pct"] == 20.0
     assert rows[0]["home_win_pct"] == 12.5
     assert rows[0]["draw_pct"] == 60.0
     assert rows[0]["away_win_pct"] == 27.5
     assert rows[0]["probability_source"] == "outcome_model"
-    assert _format_score(rows[0]) == "1 x 0"
+    assert _format_score(rows[0]) == "0 x 0"
+
+
+def test_load_round_probabilities_aligns_model_score_with_away_favorite(tmp_path: Path) -> None:
+    db_path = tmp_path / "world_cup.duckdb"
+    with duckdb.connect(str(db_path)) as con:
+        con.execute(
+            """
+            CREATE TABLE simulated_results (
+                simulation_id INTEGER NOT NULL,
+                match_number INTEGER NOT NULL,
+                group_name VARCHAR,
+                home_team_id VARCHAR NOT NULL,
+                home_team_name VARCHAR NOT NULL,
+                away_team_id VARCHAR NOT NULL,
+                away_team_name VARCHAR NOT NULL,
+                home_goals INTEGER NOT NULL,
+                away_goals INTEGER NOT NULL
+            )
+            """,
+        )
+        con.executemany(
+            """
+            INSERT INTO simulated_results (
+                simulation_id,
+                match_number,
+                group_name,
+                home_team_id,
+                home_team_name,
+                away_team_id,
+                away_team_name,
+                home_goals,
+                away_goals
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, 5, "Group C", "HAI", "Haiti", "SCO", "Scotland", 1, 1),
+                (2, 5, "Group C", "HAI", "Haiti", "SCO", "Scotland", 1, 1),
+                (3, 5, "Group C", "HAI", "Haiti", "SCO", "Scotland", 1, 1),
+                (4, 5, "Group C", "HAI", "Haiti", "SCO", "Scotland", 0, 1),
+                (5, 5, "Group C", "HAI", "Haiti", "SCO", "Scotland", 1, 2),
+            ],
+        )
+        con.execute(
+            """
+            CREATE TABLE outcome_predictions (
+                match_number INTEGER PRIMARY KEY,
+                round_name VARCHAR NOT NULL,
+                group_name VARCHAR,
+                match_date TIMESTAMP,
+                home_team_id VARCHAR NOT NULL,
+                home_team_name VARCHAR NOT NULL,
+                away_team_id VARCHAR NOT NULL,
+                away_team_name VARCHAR NOT NULL,
+                home_win_pct DOUBLE NOT NULL,
+                draw_pct DOUBLE NOT NULL,
+                away_win_pct DOUBLE NOT NULL,
+                predicted_outcome VARCHAR NOT NULL,
+                calibration_temperature DOUBLE,
+                model_path VARCHAR,
+                created_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO outcome_predictions (
+                match_number,
+                round_name,
+                group_name,
+                match_date,
+                home_team_id,
+                home_team_name,
+                away_team_id,
+                away_team_name,
+                home_win_pct,
+                draw_pct,
+                away_win_pct,
+                predicted_outcome,
+                calibration_temperature,
+                model_path,
+                created_at
+            ) VALUES (
+                5,
+                'group_stage',
+                'Group C',
+                TIMESTAMP '2026-06-13 13:00:00',
+                'HAI',
+                'Haiti',
+                'SCO',
+                'Scotland',
+                21.0,
+                28.2,
+                50.8,
+                'away_win',
+                2.0,
+                'models/xgb_outcome_model.json',
+                current_timestamp
+            )
+            """
+        )
+
+    rows = _load_round_probabilities(
+        str(db_path),
+        (5,),
+        show_all_matchups=True,
+        dynamic_matchups=False,
+    )
+
+    assert len(rows) == 1
+    assert _format_score(rows[0]) == "0 x 1"
+    assert rows[0]["score_occurrence_pct"] == 20.0
 
 
 def test_load_round_probabilities_can_use_simulation_source(tmp_path: Path) -> None:
