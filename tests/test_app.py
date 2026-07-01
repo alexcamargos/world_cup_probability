@@ -15,7 +15,9 @@ from src.app import (
     _format_actual_score,
     _format_score,
     _group_round_accuracy_rows,
+    _home_projection_showcase_html,
     _load_round_probabilities,
+    _match_prediction_cards_html,
     _metric_cards_html,
     _phase_accuracy_rows,
     _prediction_result,
@@ -408,6 +410,106 @@ def test_metric_cards_html_renders_labels_and_values_without_streamlit_metric() 
     assert 'class="metric-value">51.4%</div>' in rendered
     assert 'class="metric-delta">18 acertos</div>' in rendered
     assert "stMetric" not in rendered
+
+
+def test_match_prediction_cards_html_compares_prediction_with_actual_result() -> None:
+    rendered = _match_prediction_cards_html(
+        [
+            {
+                "match_number": 1,
+                "bucket": "A",
+                "home_team_id": "MEX",
+                "home_team_name": "Mexico",
+                "away_team_id": "RSA",
+                "away_team_name": "Africa do Sul",
+                "home_win_pct": 71.0,
+                "draw_pct": 20.0,
+                "away_win_pct": 9.0,
+                "predicted_home_goals": 2,
+                "predicted_away_goals": 0,
+                "actual_home_goals": 2,
+                "actual_away_goals": 0,
+                "prediction_result": "Acerto",
+                "probability_source": "outcome_model",
+                "occurrence_pct": 88.0,
+            }
+        ],
+        include_occurrence=True,
+    )
+
+    assert 'class="match-prediction-card"' in rendered
+    assert "Jogo 1" in rendered
+    assert "Ocorr. 88.00%" in rendered
+    assert "Modelo previa" in rendered
+    assert "71.0%" in rendered
+    assert "2 x 0" in rendered
+    assert "Acerto" in rendered
+    assert "source-pill" in rendered
+
+
+def test_match_prediction_cards_html_marks_pending_unplayed_match() -> None:
+    rendered = _match_prediction_cards_html(
+        [
+            {
+                "match_number": 2,
+                "bucket": "A",
+                "home_team_id": "BRA",
+                "home_team_name": "Brasil",
+                "away_team_id": "ARG",
+                "away_team_name": "Argentina",
+                "home_win_pct": 40.0,
+                "draw_pct": 35.0,
+                "away_win_pct": 25.0,
+                "predicted_home_goals": 1,
+                "predicted_away_goals": 1,
+                "actual_home_goals": None,
+                "actual_away_goals": None,
+                "prediction_result": None,
+                "probability_source": "simulation",
+            }
+        ],
+        include_occurrence=False,
+    )
+
+    assert "Aguardando real" in rendered
+    assert "vs" in rendered
+    assert "A jogar" in rendered
+    assert "Sim." in rendered
+
+
+def test_home_projection_showcase_html_renders_favorite_and_challengers() -> None:
+    rendered = _home_projection_showcase_html(
+        [
+            {
+                "team_id": "FRA",
+                "team_name": "Franca",
+                "champion_pct": 24.5,
+                "final_pct": 41.0,
+                "semifinal_pct": 67.0,
+                "round_of_16_pct": 100.0,
+            },
+            {
+                "team_id": "ESP",
+                "team_name": "Espanha",
+                "champion_pct": 14.8,
+                "final_pct": 25.0,
+                "semifinal_pct": 42.0,
+                "round_of_16_pct": 98.0,
+            },
+        ],
+        {"simulation_count": 50000, "last_created_at": "2026-06-30 20:00"},
+    )
+
+    assert "Favorita do modelo" in rendered
+    assert "Franca" in rendered
+    assert "24.5%" in rendered
+    assert "FNL" in rendered
+    assert "41.0%" in rendered
+    assert "Candidatas seguintes" in rendered
+    assert "02" in rendered
+    assert "Espanha" in rendered
+    assert "FNL 25% - SF 42%" in rendered
+    assert "50.000 simulacoes" in rendered
 
 
 def test_actual_group_standings_rank_by_points_goal_diff_and_goals_for() -> None:
