@@ -90,6 +90,7 @@ uv run dashboard
 - `models/xgb_outcome_model.json`: modelo de vitória, empate e derrota.
 - `models/xgb_outcome_metrics.json`: métricas de validação do modelo categórico.
 - `models/xgb_outcome_calibration.json`: calibração das probabilidades V/E/D.
+- `models/dixon_coles_calibration.json`: `rho` Dixon-Coles calibrado por validação.
 - `models/world_cup_2026_holdout_metrics.json`: avaliação de holdout da Copa de
   2026 quando houver jogos pontuados.
 - `reports/figures/xgb_poisson_beeswarm.png`: explicabilidade SHAP do modelo de
