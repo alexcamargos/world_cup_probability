@@ -17,6 +17,7 @@ DEFAULT_TRANSFERMARKT_MANIFEST = CONFIG_DIR / "transfermarkt_teams.json"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 MODEL_PATH = MODELS_DIR / "xgb_poisson_model.json"
+DIXON_COLES_CALIBRATION_PATH = MODELS_DIR / "dixon_coles_calibration.json"
 
 REPORTS_DIR = PROJECT_ROOT / "reports"
 FIGURES_DIR = REPORTS_DIR / "figures"
