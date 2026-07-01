@@ -217,7 +217,7 @@ def _render_accuracy_chart(rows: list[dict[str, Any]], *, label_column: str) -> 
             color=alt.Color(
                 "metrica:N",
                 title=None,
-                scale=alt.Scale(range=["#0f6b5f", "#d65f4c"]),
+                scale=alt.Scale(range=["#08786c", "#c85547"]),
             ),
             xOffset="metrica:N",
             tooltip=[
@@ -229,7 +229,7 @@ def _render_accuracy_chart(rows: list[dict[str, Any]], *, label_column: str) -> 
         .properties(height=300)
         .configure(background="#ffffff")
         .configure_view(stroke=None)
-        .configure_axis(gridColor="#e5e7eb", labelColor="#344054", titleColor="#475467")
+        .configure_axis(gridColor="#e8eef4", labelColor="#344054", titleColor="#667085")
         .configure_legend(labelColor="#344054", titleColor="#344054")
     )
     st.altair_chart(chart, use_container_width=True)
@@ -342,7 +342,7 @@ def _stage_probability_chart(frame: pl.DataFrame) -> alt.Chart:
             color=alt.Color(
                 "fase:N",
                 title=None,
-                scale=alt.Scale(range=["#d65f4c", "#246baf", "#0f6b5f"]),
+                scale=alt.Scale(range=["#c85547", "#2563a8", "#08786c"]),
             ),
             tooltip=[
                 alt.Tooltip("team_name:N", title="Selecao"),
@@ -353,7 +353,7 @@ def _stage_probability_chart(frame: pl.DataFrame) -> alt.Chart:
         .properties(height=380)
         .configure(background="#ffffff")
         .configure_view(stroke=None)
-        .configure_axis(gridColor="#e5e7eb", labelColor="#344054", titleColor="#475467")
+        .configure_axis(gridColor="#e8eef4", labelColor="#344054", titleColor="#667085")
         .configure_legend(labelColor="#344054", titleColor="#344054")
     )
 
