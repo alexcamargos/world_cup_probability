@@ -15,6 +15,9 @@ from src.simulator import (
     TeamLambda,
     _apply_group_result,
     _dixon_coles_tau,
+    calibrate_dixon_coles_rho,
+    load_dixon_coles_rho,
+    save_dixon_coles_calibration,
     simulate_match,
     simulate_world_cup,
 )
@@ -114,6 +117,39 @@ def test_dixon_coles_tau_adjusts_low_score_dependence() -> None:
     assert _dixon_coles_tau(0, 1, home_lambda, away_lambda, rho) < 1.0
     assert _dixon_coles_tau(1, 0, home_lambda, away_lambda, rho) < 1.0
     assert _dixon_coles_tau(2, 1, home_lambda, away_lambda, rho) == 1.0
+
+
+def test_calibrate_dixon_coles_rho_selects_lowest_validation_log_loss() -> None:
+    result = calibrate_dixon_coles_rho(
+        home_goals=np.asarray([0, 1, 1, 1]),
+        away_goals=np.asarray([0, 1, 1, 1]),
+        home_lambdas=np.asarray([1.2, 1.2, 1.2, 1.2]),
+        away_lambdas=np.asarray([1.1, 1.1, 1.1, 1.1]),
+        candidate_rhos=(-0.10, 0.0, 0.10),
+        default_rho=0.0,
+    )
+
+    assert result.rho == -0.10
+    assert result.validation_rows == 4
+    assert result.mean_negative_log_likelihood < result.default_mean_negative_log_likelihood
+
+
+def test_dixon_coles_calibration_artifact_overrides_default_rho(tmp_path: Path) -> None:
+    calibration_path = tmp_path / "dixon_coles_calibration.json"
+
+    save_dixon_coles_calibration(
+        calibration_path=calibration_path,
+        result=calibrate_dixon_coles_rho(
+            home_goals=np.asarray([0, 1, 1, 1]),
+            away_goals=np.asarray([0, 1, 1, 1]),
+            home_lambdas=np.asarray([1.2, 1.2, 1.2, 1.2]),
+            away_lambdas=np.asarray([1.1, 1.1, 1.1, 1.1]),
+            candidate_rhos=(-0.10, 0.0, 0.10),
+        ),
+    )
+
+    assert load_dixon_coles_rho(calibration_path=calibration_path) == -0.10
+    assert load_dixon_coles_rho(calibration_path=tmp_path / "missing.json") == -0.10
 
 
 def test_simulate_match_can_use_legacy_independent_poisson_engine() -> None:
