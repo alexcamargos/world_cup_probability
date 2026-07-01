@@ -7,7 +7,15 @@ import duckdb
 import pytest
 
 from src.db_init import initialize_database
-from src.elo_engine import _competition_weight, _goal_margin_multiplier, build_elo_history
+from src.elo_engine import (
+    EloParameters,
+    MatchRecord,
+    _calibrate_elo_parameters,
+    _competition_weight,
+    _compute_matches_signature,
+    _goal_margin_multiplier,
+    build_elo_history,
+)
 
 
 def test_build_elo_history_upserts_existing_match(tmp_path: Path, caplog) -> None:
@@ -232,3 +240,115 @@ def test_goal_margin_multiplier_rewards_decisive_upsets_more_than_favorite_wins(
         home_advantage=0.0,
         exponent=0.6,
     ) == pytest.approx(1.0)
+
+
+def test_elo_calibration_caching(tmp_path: Path) -> None:
+    """Test that ELO calibration correctly caches parameters and loads from cache.
+
+    Args:
+        tmp_path: Pytest temporary directory fixture.
+    """
+    # Create sample matches
+    matches = [
+        MatchRecord(
+            match_id=f"m{i}",
+            match_date=f"2026-06-{i:02d}",
+            competition="Friendly",
+            season="2026",
+            stage="Group",
+            home_team_id="TeamA",
+            away_team_id="TeamB",
+            home_team_score=1,
+            away_team_score=0,
+            neutral_site=False,
+        )
+        for i in range(1, 100)  # 99 matches to satisfy min_matches=80
+    ]
+
+    default_params = EloParameters()
+    cache_file = tmp_path / "elo_calibration_cache.json"
+
+    # 1. Verify matches signature is computed correctly and is stable
+    sig1 = _compute_matches_signature(matches)
+    sig2 = _compute_matches_signature(matches)
+    assert sig1 == sig2
+    assert len(sig1) == 64  # SHA256 hex string length
+
+    # 2. First calibration run (cache miss) should perform grid search and save parameters
+    assert not cache_file.exists()
+    params_miss = _calibrate_elo_parameters(
+        matches,
+        initial_world_cup_probability_elo=1500.0,
+        default_parameters=default_params,
+        validation_fraction=0.2,
+        min_matches=80,
+        cache_path=cache_file,
+    )
+    assert cache_file.is_file()
+    assert params_miss.validation_error is not None
+
+    # Load cache file and verify its contents
+    import json
+    with open(cache_file, encoding="utf-8") as f:
+        cache_data = json.load(f)
+    assert cache_data["matches_signature"] == sig1
+    assert cache_data["validation_fraction"] == 0.2
+    assert cache_data["min_matches"] == 80
+    assert cache_data["initial_world_cup_probability_elo"] == 1500.0
+    assert cache_data["calibrated_parameters"]["base_k_factor"] == params_miss.base_k_factor
+
+    # 3. Second run (cache hit) should load from cache instantly (and return identical params)
+    params_hit = _calibrate_elo_parameters(
+        matches,
+        initial_world_cup_probability_elo=1500.0,
+        default_parameters=default_params,
+        validation_fraction=0.2,
+        min_matches=80,
+        cache_path=cache_file,
+    )
+    assert params_hit.base_k_factor == params_miss.base_k_factor
+    assert params_hit.home_advantage_points == params_miss.home_advantage_points
+    assert params_hit.goal_margin_exponent == params_miss.goal_margin_exponent
+    assert params_hit.validation_error == params_miss.validation_error
+
+    # 4. Modifying match records should invalidate the cache (signature mismatch)
+    modified_matches = list(matches)
+    modified_matches[0] = MatchRecord(
+        match_id="m1",
+        match_date="2026-06-01",
+        competition="Friendly",
+        season="2026",
+        stage="Group",
+        home_team_id="TeamA",
+        away_team_id="TeamB",
+        home_team_score=10,  # Modified score to change signature
+        away_team_score=0,
+        neutral_site=False,
+    )
+    sig_modified = _compute_matches_signature(modified_matches)
+    assert sig_modified != sig1
+
+    # Run calibration again with modified matches: should re-calibrate
+    params_modified = _calibrate_elo_parameters(
+        modified_matches,
+        initial_world_cup_probability_elo=1500.0,
+        default_parameters=default_params,
+        validation_fraction=0.2,
+        min_matches=80,
+        cache_path=cache_file,
+    )
+    # The cache file should now be updated with the new signature
+    with open(cache_file, encoding="utf-8") as f:
+        new_cache_data = json.load(f)
+    assert new_cache_data["matches_signature"] == sig_modified
+
+    # 5. Bypassing cache (passing cache_path=None)
+    params_no_cache = _calibrate_elo_parameters(
+        matches,
+        initial_world_cup_probability_elo=1500.0,
+        default_parameters=default_params,
+        validation_fraction=0.2,
+        min_matches=80,
+        cache_path=None,
+    )
+    assert params_no_cache.validation_error is not None
