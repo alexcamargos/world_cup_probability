@@ -1063,12 +1063,121 @@ def _build_side_frame(match_df: pl.DataFrame, *, side: str) -> pl.DataFrame:
     )
 
 
-def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
-    """Compute recent form using only prior non-holdout rows for each team."""
-    sorted_df = team_df.sort(["team", "match_date", "match_id"])
-    enriched = sorted_df.group_by("team", maintain_order=True).map_groups(_recent_form_for_team)
+def _compute_rolling_feature(
+    df: pl.DataFrame,
+    metric_col: str,
+    output_col: str,
+    window: int = 5,
+) -> pl.DataFrame:
+    """Compute rolling average of a metric over a team, ignoring nulls and current WC rows.
 
-    return enriched.select(
+    Args:
+        df: The input Polars DataFrame.
+        metric_col: The column name of the metric to average.
+        output_col: The column name for the output feature.
+        window: The size of the rolling window.
+
+    Returns:
+        A Polars DataFrame with the new rolling average feature.
+    """
+    metric_df = df.filter(
+        pl.col("is_current_world_cup").not_() & pl.col(metric_col).is_not_null()
+    ).select(["_index", "team", metric_col])
+
+    metric_df = metric_df.with_columns(
+        pl.col(metric_col)
+        .rolling_mean(window_size=window, min_samples=1)
+        .over("team")
+        .alias("rolling_val")
+    )
+
+    return (
+        df.join(metric_df.select(["_index", "rolling_val"]), on="_index", how="left")
+        .with_columns(
+            pl.col("rolling_val")
+            .forward_fill()
+            .shift(1)
+            .over("team")
+            .fill_null(0.0)
+            .alias(output_col)
+        )
+        .drop("rolling_val")
+    )
+
+
+def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
+    """Compute recent form using only prior non-holdout rows for each team.
+
+    Args:
+        team_df: The input Polars DataFrame.
+
+    Returns:
+        A Polars DataFrame containing the computed recent-form features.
+    """
+    df = team_df.sort(["team", "match_date", "match_id"])
+    df = df.with_row_index("_index")
+    df = df.with_columns(
+        pl.col("competition")
+        .fill_null("")
+        .str.to_lowercase()
+        .str.contains("friendly|amistoso")
+        .cast(pl.Float64)
+        .alias("is_friendly_match")
+    )
+
+    df = df.with_columns(
+        (
+            (pl.col("goals_for") - pl.col("goals_against"))
+            * (pl.col("opponent_world_cup_probability_elo_before").fill_null(1500.0) / 1500.0)
+        ).alias("_temp_opponent_adjusted_val"),
+        pl.when(pl.col("is_friendly_match") == 0.0)
+        .then(pl.col("goals_for") - pl.col("goals_against"))
+        .otherwise(None)
+        .alias("_temp_official_form_val"),
+        pl.when(pl.col("is_friendly_match") == 1.0)
+        .then(pl.col("goals_for") - pl.col("goals_against"))
+        .otherwise(None)
+        .alias("_temp_friendly_form_val"),
+    )
+
+    df = _compute_rolling_feature(df, "goals_for", "_temp_goals_for_rolling")
+    df = _compute_rolling_feature(df, "goals_against", "_temp_goals_against_rolling")
+    df = df.with_columns(
+        (pl.col("_temp_goals_for_rolling") - pl.col("_temp_goals_against_rolling")).alias(
+            "recent_form"
+        )
+    ).drop(["_temp_goals_for_rolling", "_temp_goals_against_rolling"])
+
+    metric_mapping = {
+        "xg_for": "recent_xg_for",
+        "xg_against": "recent_xg_against",
+        "possession_pct": "recent_possession_pct",
+        "shots_for": "recent_shots_for",
+        "shots_against": "recent_shots_against",
+        "shots_on_target_for": "recent_shots_on_target_for",
+        "shots_on_target_against": "recent_shots_on_target_against",
+        "corners_for": "recent_corners_for",
+        "corners_against": "recent_corners_against",
+        "yellow_cards": "recent_yellow_cards",
+        "red_cards": "recent_red_cards",
+        "_temp_opponent_adjusted_val": "opponent_adjusted_recent_form",
+        "_temp_official_form_val": "recent_official_form",
+        "_temp_friendly_form_val": "recent_friendly_form",
+    }
+
+    for metric_col, output_col in metric_mapping.items():
+        df = _compute_rolling_feature(df, metric_col, output_col)
+
+    df = df.drop(
+        [
+            "_index",
+            "_temp_opponent_adjusted_val",
+            "_temp_official_form_val",
+            "_temp_friendly_form_val",
+        ]
+    )
+
+    return df.select(
         [
             pl.col("match_id"),
             pl.col("match_date"),
@@ -1118,125 +1227,6 @@ def _recent_form(team_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("target"),
         ]
     )
-
-
-def _recent_form_for_team(team_df: pl.DataFrame) -> pl.DataFrame:
-    """Compute recent form without letting 2026 World Cup rows enter history."""
-    goals_for_history: list[float] = []
-    goals_against_history: list[float] = []
-    metric_histories: dict[str, list[float]] = {
-        "xg_for": [],
-        "xg_against": [],
-        "possession_pct": [],
-        "shots_for": [],
-        "shots_against": [],
-        "shots_on_target_for": [],
-        "shots_on_target_against": [],
-        "corners_for": [],
-        "corners_against": [],
-        "yellow_cards": [],
-        "red_cards": [],
-    }
-    adjusted_form_history: list[float] = []
-    official_form_history: list[float] = []
-    friendly_form_history: list[float] = []
-    recent_form: list[float] = []
-    rolling_values: dict[str, list[float]] = {column: [] for column in ROLLING_FEATURE_DEFAULTS}
-    is_friendly_match: list[float] = []
-
-    for row in team_df.iter_rows(named=True):
-        if goals_for_history:
-            recent_goals_for = goals_for_history[-5:]
-            recent_goals_against = goals_against_history[-5:]
-            form = (sum(recent_goals_for) / len(recent_goals_for)) - (
-                sum(recent_goals_against) / len(recent_goals_against)
-            )
-        else:
-            form = 0.0
-
-        recent_form.append(form)
-        rolling_values["recent_xg_for"].append(_rolling_average(metric_histories["xg_for"]))
-        rolling_values["recent_xg_against"].append(_rolling_average(metric_histories["xg_against"]))
-        rolling_values["recent_possession_pct"].append(
-            _rolling_average(metric_histories["possession_pct"])
-        )
-        rolling_values["recent_shots_for"].append(_rolling_average(metric_histories["shots_for"]))
-        rolling_values["recent_shots_against"].append(
-            _rolling_average(metric_histories["shots_against"])
-        )
-        rolling_values["recent_shots_on_target_for"].append(
-            _rolling_average(metric_histories["shots_on_target_for"])
-        )
-        rolling_values["recent_shots_on_target_against"].append(
-            _rolling_average(metric_histories["shots_on_target_against"])
-        )
-        rolling_values["recent_corners_for"].append(
-            _rolling_average(metric_histories["corners_for"])
-        )
-        rolling_values["recent_corners_against"].append(
-            _rolling_average(metric_histories["corners_against"])
-        )
-        rolling_values["recent_yellow_cards"].append(
-            _rolling_average(metric_histories["yellow_cards"])
-        )
-        rolling_values["recent_red_cards"].append(_rolling_average(metric_histories["red_cards"]))
-        rolling_values["opponent_adjusted_recent_form"].append(
-            _rolling_average(adjusted_form_history)
-        )
-        rolling_values["recent_official_form"].append(_rolling_average(official_form_history))
-        rolling_values["recent_friendly_form"].append(_rolling_average(friendly_form_history))
-        friendly_match = _is_friendly_competition(row.get("competition"))
-        is_friendly_match.append(1.0 if friendly_match else 0.0)
-
-        if not bool(row["is_current_world_cup"]):
-            goals_for = float(row["goals_for"])
-            goals_against = float(row["goals_against"])
-            goal_diff = goals_for - goals_against
-            goals_for_history.append(goals_for)
-            goals_against_history.append(goals_against)
-            opponent_rating = _maybe_float(row.get("opponent_world_cup_probability_elo_before"))
-            opponent_strength = (opponent_rating or 1500.0) / 1500.0
-            adjusted_form_history.append(goal_diff * opponent_strength)
-            if friendly_match:
-                friendly_form_history.append(goal_diff)
-            else:
-                official_form_history.append(goal_diff)
-
-            for metric_name, history in metric_histories.items():
-                metric_value = _maybe_float(row.get(metric_name))
-                if metric_value is not None:
-                    history.append(metric_value)
-
-    return team_df.with_columns(
-        [
-            pl.Series("recent_form", recent_form),
-            *[pl.Series(column, values) for column, values in rolling_values.items()],
-            pl.Series("is_friendly_match", is_friendly_match),
-        ]
-    )
-
-
-def _rolling_average(values: list[float], *, window: int = 5) -> float:
-    recent_values = values[-window:]
-    if not recent_values:
-        return 0.0
-    return sum(recent_values) / len(recent_values)
-
-
-def _maybe_float(value: object) -> float | None:
-    if value is None:
-        return None
-    numeric_value = float(value)
-    if numeric_value != numeric_value:
-        return None
-    return numeric_value
-
-
-def _is_friendly_competition(competition: object) -> bool:
-    if competition is None:
-        return False
-    normalized = str(competition).casefold()
-    return "friendly" in normalized or "amistoso" in normalized
 
 
 def main() -> int:
