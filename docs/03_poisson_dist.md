@@ -20,6 +20,11 @@ Para um placar `(x, y)`, lambdas `lambda_home` e `lambda_away`, e parâmetro
 - `1 x 1`: `1 - rho`
 - demais placares: `1`
 
-O default do projeto é `rho = -0.10`, que aumenta a massa de empates baixos e
-reduz levemente 0 x 1 / 1 x 0. Use `uv run simulate --dixon-coles-rho 0.0` para
-voltar ao Poisson independente.
+O projeto calibra `rho` por validação temporal com o comando
+`uv run calibrate-dixon-coles`, gravando o resultado em
+`models/dixon_coles_calibration.json`. Quando esse artefato existe, `simulate`
+usa o valor calibrado automaticamente. Se o artefato não existir, o fallback é
+`rho = -0.10`.
+
+Use `uv run simulate --dixon-coles-rho 0.0` para forçar Poisson independente ou
+outro valor manual, ignorando o artefato calibrado.
