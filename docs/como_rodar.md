@@ -305,6 +305,20 @@ Flags úteis:
 
 ## Comandos de simulação e análise
 
+### `calibrate-dixon-coles`
+
+Calibra o parâmetro `rho` da correção Dixon-Coles em uma janela temporal de
+validação e grava `models/dixon_coles_calibration.json`.
+
+```powershell
+uv run calibrate-dixon-coles
+uv run calibrate-dixon-coles --validation-fraction 0.2
+uv run calibrate-dixon-coles --rho-min -0.40 --rho-max 0.30 --rho-step 0.01
+```
+
+O `pipeline` executa essa etapa antes da simulação. O comando separado é útil
+quando você quer recalibrar o `rho` sem rodar toda a simulação Monte Carlo.
+
 ### `simulate`
 
 Executa a simulação Monte Carlo da Copa do Mundo de 2026 e grava
@@ -321,7 +335,8 @@ uv run simulate --dixon-coles-rho 0.0
 Por padrão, se `models/xgb_outcome_model.json` e
 `models/xgb_outcome_calibration.json` existirem, a simulação usa o modelo V/E/D
 para sortear o resultado e depois amostra um placar compatível. Sem esse modelo,
-usa o modo Poisson.
+usa o modo Poisson. Se `models/dixon_coles_calibration.json` existir, `simulate`
+usa o `rho` calibrado; caso contrário, usa o fallback `-0.10`.
 
 Flags úteis:
 
@@ -332,7 +347,7 @@ Flags úteis:
 - `--model-path <path>`
 - `--export-analytics`
 - `--disable-outcome-model`
-- `--dixon-coles-rho <float>`
+- `--dixon-coles-rho <float>`: override manual do `rho` calibrado.
 
 ### `analytics`
 
@@ -421,6 +436,11 @@ Pré-requisitos:
 - `simulated_results` gerada por `simulate` ou `pipeline`.
 - `outcome_predictions` gerada por `predict-outcomes` ou `pipeline`, caso queira
   ver as probabilidades V/E/D do modelo categórico.
+
+No dashboard, `Placar modelo` é o placar mais frequente dentro do resultado
+favorito da linha. Exemplo: se o modelo V/E/D favorece o visitante, o placar
+exibido será o placar de vitória visitante mais frequente nas simulações, não a
+moda global de todos os placares.
 
 ## Qualidade e testes
 
