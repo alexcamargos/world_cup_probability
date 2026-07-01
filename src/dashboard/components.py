@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import textwrap
 from typing import Any
 
 from .analysis import _actual_outcome, _most_likely_outcome, _outcome_probability
@@ -328,7 +329,8 @@ def _match_prediction_cards_html(
     cards = [
         _match_prediction_card_html(row, include_occurrence=include_occurrence) for row in rows
     ]
-    return f'<div class="match-prediction-grid">{"".join(cards)}</div>'
+    rendered_cards = "\n".join(cards)
+    return f'<div class="match-prediction-grid">{rendered_cards}</div>'
 
 
 def _match_prediction_card_html(row: dict[str, Any], *, include_occurrence: bool) -> str:
@@ -361,7 +363,8 @@ def _match_prediction_card_html(row: dict[str, Any], *, include_occurrence: bool
         f'<span class="prediction-status {status_class}">{html.escape(status_label)}</span>'
     )
 
-    return f"""
+    return textwrap.dedent(
+        f"""
     <article class="match-prediction-card">
         <div class="match-prediction-topline">
             <span>{html.escape(meta)}</span>
@@ -402,7 +405,8 @@ def _match_prediction_card_html(row: dict[str, Any], *, include_occurrence: bool
             </div>
         </dl>
     </article>
-    """
+    """,
+    ).strip()
 
 
 def _probability_bar_html(row: dict[str, Any]) -> str:
