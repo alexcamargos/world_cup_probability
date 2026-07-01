@@ -8,6 +8,8 @@ Probability Elo ratings match by match, and stores the full rating history in
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
 import math
 from collections.abc import Mapping
@@ -19,10 +21,14 @@ import polars as pl
 
 try:
     from .competition_filters import current_world_cup_exclusion_sql
-    from .settings import DB_PATH
+    from .settings import DB_PATH, ELO_CALIBRATION_CACHE_PATH
 except ImportError:  # pragma: no cover - supports direct script execution.
     from competition_filters import current_world_cup_exclusion_sql
     from settings import DB_PATH
+    try:
+        from settings import ELO_CALIBRATION_CACHE_PATH
+    except ImportError:
+        ELO_CALIBRATION_CACHE_PATH = Path(__file__).resolve().parents[1] / "models" / "elo_calibration_cache.json"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -142,6 +148,7 @@ def build_elo_history(
     calibrate_parameters: bool = True,
     calibration_validation_fraction: float = DEFAULT_ELO_CALIBRATION_FRACTION,
     min_calibration_matches: int = MIN_ELO_CALIBRATION_MATCHES,
+    cache_path: Path | None = ELO_CALIBRATION_CACHE_PATH,
 ) -> None:
     """Iteratively compute World Cup Probability Elo and upsert it into DuckDB.
 
@@ -154,6 +161,7 @@ def build_elo_history(
         calibrate_parameters: Whether to optimize Elo parameters on a temporal holdout.
         calibration_validation_fraction: Most recent historical fraction used for calibration.
         min_calibration_matches: Minimum rows required before calibration is attempted.
+        cache_path: Optional path to the ELO calibration cache file.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -181,6 +189,7 @@ def build_elo_history(
                 default_parameters=default_parameters,
                 validation_fraction=calibration_validation_fraction,
                 min_matches=min_calibration_matches,
+                cache_path=cache_path,
             )
             if calibrate_parameters
             else default_parameters
@@ -387,6 +396,25 @@ def _should_log_elo_progress(
     )
 
 
+def _compute_matches_signature(matches: list[MatchRecord]) -> str:
+    """Compute a SHA-256 signature of the matches list to detect database changes.
+
+    Args:
+        matches: A list of MatchRecord objects representing the dataset.
+
+    Returns:
+        A hex-encoded SHA-256 string representing the unique signature of the dataset.
+    """
+    hasher = hashlib.sha256()
+    match_str = "".join(
+        f"{m.match_id}:{m.match_date}:{m.competition}:{m.home_team_id}:{m.away_team_id}:"
+        f"{m.home_team_score}:{m.away_team_score}:{m.neutral_site}\n"
+        for m in matches
+    )
+    hasher.update(match_str.encode("utf-8"))
+    return hasher.hexdigest()
+
+
 def _calibrate_elo_parameters(
     matches: list[MatchRecord],
     *,
@@ -394,8 +422,24 @@ def _calibrate_elo_parameters(
     default_parameters: EloParameters,
     validation_fraction: float,
     min_matches: int,
+    cache_path: Path | None = None,
 ) -> EloParameters:
-    """Tune Elo parameters by minimizing temporal holdout squared error."""
+    """Tune Elo parameters by minimizing temporal holdout squared error.
+
+    Args:
+        matches: A list of MatchRecord objects representing historical matches.
+        initial_world_cup_probability_elo: Starting rating for unseen teams.
+        default_parameters: Initial/default parameters to fall back on or start grid search.
+        validation_fraction: Most recent historical fraction used for validation.
+        min_matches: Minimum rows required before calibration is attempted.
+        cache_path: Optional path to the JSON file for loading/saving calibrated parameters.
+
+    Returns:
+        The calibrated EloParameters.
+
+    Raises:
+        ValueError: If validation_fraction is not between 0 and 1, or min_matches is not positive.
+    """
     if not 0.0 < validation_fraction < 1.0:
         raise ValueError("calibration_validation_fraction must be greater than 0 and less than 1.")
     if min_matches <= 0:
@@ -408,6 +452,42 @@ def _calibrate_elo_parameters(
         )
         return default_parameters
 
+    # Try cache lookup first
+    matches_signature = _compute_matches_signature(matches)
+    if cache_path is not None:
+        try:
+            if cache_path.is_file():
+                with open(cache_path, encoding="utf-8") as f:
+                    cache_data = json.load(f)
+
+                # Check validation fields
+                sig_match = cache_data.get("matches_signature") == matches_signature
+                elo_match = cache_data.get("initial_world_cup_probability_elo") == initial_world_cup_probability_elo
+                frac_match = cache_data.get("validation_fraction") == validation_fraction
+                min_match = cache_data.get("min_matches") == min_matches
+
+                if sig_match and elo_match and frac_match and min_match:
+                    cached_params = cache_data["calibrated_parameters"]
+                    LOGGER.info("Loaded calibrated Elo parameters from cache file: %s", cache_path)
+                    return EloParameters(
+                        base_k_factor=float(cached_params["base_k_factor"]),
+                        home_advantage_points=float(cached_params["home_advantage_points"]),
+                        goal_margin_exponent=float(cached_params["goal_margin_exponent"]),
+                        competition_weights=cached_params["competition_weights"],
+                        validation_error=(
+                            float(cached_params["validation_error"])
+                            if cached_params.get("validation_error") is not None
+                            else None
+                        ),
+                    )
+                else:
+                    LOGGER.info(
+                        "Elo calibration cache found but signature/parameters mismatched. Re-calibrating."
+                    )
+        except Exception as e:
+            LOGGER.warning("Failed to read Elo calibration cache from %s: %s", cache_path, e)
+
+    LOGGER.info("Running Elo parameters calibration (grid search + coordinate search)...")
     best_parameters = _grid_search_global_elo_parameters(
         matches,
         initial_world_cup_probability_elo=initial_world_cup_probability_elo,
@@ -422,6 +502,28 @@ def _calibrate_elo_parameters(
             parameters=best_parameters,
             validation_fraction=validation_fraction,
         )
+
+    # Save to cache if cache_path is provided
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "matches_signature": matches_signature,
+                "initial_world_cup_probability_elo": initial_world_cup_probability_elo,
+                "validation_fraction": validation_fraction,
+                "min_matches": min_matches,
+                "calibrated_parameters": {
+                    "base_k_factor": best_parameters.base_k_factor,
+                    "home_advantage_points": best_parameters.home_advantage_points,
+                    "goal_margin_exponent": best_parameters.goal_margin_exponent,
+                    "competition_weights": dict(best_parameters.competition_weights),
+                    "validation_error": best_parameters.validation_error,
+                },
+            }
+            cache_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            LOGGER.info("Saved calibrated Elo parameters to cache file: %s", cache_path)
+        except Exception as e:
+            LOGGER.warning("Failed to write Elo calibration cache to %s: %s", cache_path, e)
 
     return best_parameters
 
@@ -831,6 +933,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=MIN_ELO_CALIBRATION_MATCHES,
         help="Minimum historical rows required before Elo calibration runs.",
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable loading and saving to the ELO calibration cache.",
+    )
     return parser
 
 
@@ -845,6 +952,7 @@ def main() -> int:
         calibrate_parameters=not args.no_calibration,
         calibration_validation_fraction=args.calibration_validation_fraction,
         min_calibration_matches=args.min_calibration_matches,
+        cache_path=None if args.no_cache else ELO_CALIBRATION_CACHE_PATH,
     )
     return 0
 
