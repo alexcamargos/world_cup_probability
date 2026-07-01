@@ -766,13 +766,21 @@ def _competition_weight(
 
 
 def _competition_group(competition: str | None) -> str:
-    """Map noisy competition labels to tunable Elo competition buckets."""
+    """Map noisy competition labels to tunable Elo competition buckets.
+
+    Args:
+        competition: The competition name or label to group.
+
+    Returns:
+        The matched competition category string as defined in Elo weights.
+    """
     if competition is None:
         return "default"
     normalized = competition.casefold()
     if (
         "world cup qualifier" in normalized
         or "world cup qualifying" in normalized
+        or "world cup qualification" in normalized
         or "copa do mundo qualific" in normalized
     ):
         return "world_cup_qualifier"
