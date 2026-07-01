@@ -121,6 +121,57 @@ TEAM_NAMES_PT_BR = {
     "UZB": "Uzbequistao",
 }
 
+TEAM_FLAG_EMOJI = {
+    "ALG": "🇩🇿",
+    "ARG": "🇦🇷",
+    "AUS": "🇦🇺",
+    "AUT": "🇦🇹",
+    "BEL": "🇧🇪",
+    "BIH": "🇧🇦",
+    "BRA": "🇧🇷",
+    "CAN": "🇨🇦",
+    "CIV": "🇨🇮",
+    "COD": "🇨🇩",
+    "COL": "🇨🇴",
+    "CPV": "🇨🇻",
+    "CRO": "🇭🇷",
+    "CUW": "🇨🇼",
+    "CZE": "🇨🇿",
+    "ECU": "🇪🇨",
+    "EGY": "🇪🇬",
+    "ENG": "🏴",
+    "ESP": "🇪🇸",
+    "FRA": "🇫🇷",
+    "GER": "🇩🇪",
+    "GHA": "🇬🇭",
+    "HAI": "🇭🇹",
+    "IRN": "🇮🇷",
+    "IRQ": "🇮🇶",
+    "JOR": "🇯🇴",
+    "JPN": "🇯🇵",
+    "KOR": "🇰🇷",
+    "KSA": "🇸🇦",
+    "MAR": "🇲🇦",
+    "MEX": "🇲🇽",
+    "NED": "🇳🇱",
+    "NOR": "🇳🇴",
+    "NZL": "🇳🇿",
+    "PAN": "🇵🇦",
+    "PAR": "🇵🇾",
+    "POR": "🇵🇹",
+    "QAT": "🇶🇦",
+    "RSA": "🇿🇦",
+    "SCO": "🏴",
+    "SEN": "🇸🇳",
+    "SUI": "🇨🇭",
+    "SWE": "🇸🇪",
+    "TUN": "🇹🇳",
+    "TUR": "🇹🇷",
+    "URU": "🇺🇾",
+    "USA": "🇺🇸",
+    "UZB": "🇺🇿",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class RoundOption:
@@ -312,18 +363,28 @@ def main() -> None:
 
     _render_accuracy_overview(summary, scoped_played_analysis, selected_round, prediction_source)
 
-    tab_overview, tab_groups, tab_global, tab_bracket, tab_probabilities, tab_matches = st.tabs(
+    (
+        tab_overview,
+        tab_groups,
+        tab_global,
+        tab_bracket,
+        tab_match_predictions,
+        tab_probabilities,
+        tab_matches,
+    ) = st.tabs(
         [
             "Visao geral",
             "Grupos",
             "Prognostico",
             "Chaveamento",
+            "Previsao por jogo",
             "Probabilidades",
             "Jogos avaliados",
         ],
     )
 
     with tab_overview:
+        _render_home_projection_showcase(global_projection, summary)
         _render_accuracy_sections(scoped_played_analysis)
 
     with tab_groups:
@@ -334,6 +395,13 @@ def main() -> None:
 
     with tab_bracket:
         _render_bracket_section(bracket_projection)
+
+    with tab_match_predictions:
+        _render_match_prediction_section(
+            selected_round=selected_round,
+            rows=rows,
+            fixtures=fixtures,
+        )
 
     with tab_probabilities:
         _render_round_probability_section(
@@ -419,6 +487,20 @@ def _render_prediction_source_selector(db_path: Path) -> str:
             "para habilitar o modelo V/E/D no dashboard.",
         )
     return str(prediction_source)
+
+
+def _render_home_projection_showcase(
+    global_projection: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> None:
+    if not global_projection:
+        st.info("Ainda nao ha prognostico global para montar o destaque do modelo.")
+        return
+
+    st.markdown(
+        _home_projection_showcase_html(global_projection, summary),
+        unsafe_allow_html=True,
+    )
 
 
 def _render_accuracy_sections(played_analysis: list[dict[str, Any]]) -> None:
@@ -662,6 +744,36 @@ def _render_round_probability_section(
         _probability_table_html(
             display_rows,
             first_column_header=selected_round.first_column_header,
+            include_occurrence=selected_round.dynamic_matchups,
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_match_prediction_section(
+    *,
+    selected_round: RoundOption,
+    rows: list[dict[str, Any]],
+    fixtures: tuple[WorldCupFixture, ...],
+) -> None:
+    if selected_round.key == "overall":
+        st.info("Selecione uma rodada no filtro lateral para ver a previsao visual por jogo.")
+        return
+
+    if not rows:
+        st.warning("Nao ha resultados de simulacao para a rodada selecionada.")
+        return
+
+    display_rows = _localize_rows(rows, selected_round, fixtures)
+    st.subheader("Como o modelo via cada jogo")
+    st.caption(
+        "Cada card mostra a probabilidade de vitoria do mandante, empate e vitoria do "
+        "visitante. Quando ha placar real, o card compara a previsao mais provavel com o "
+        "resultado observado."
+    )
+    st.markdown(
+        _match_prediction_cards_html(
+            display_rows,
             include_occurrence=selected_round.dynamic_matchups,
         ),
         unsafe_allow_html=True,
@@ -1400,6 +1512,108 @@ def _played_matches_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
     ]
 
 
+def _home_projection_showcase_html(
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> str:
+    if not rows:
+        return ""
+
+    leader = rows[0]
+    challengers = rows[1:12]
+    return f"""
+    <section class="home-projection-showcase">
+        <div class="favorite-panel">
+            <div class="favorite-copy">
+                <p>Favorita do modelo</p>
+                <div class="favorite-title-line">
+                    {_team_flag_badge_html(str(leader["team_id"]))}
+                    <strong>{html.escape(str(leader["team_name"]))}</strong>
+                    <span>{_format_metric_pct(leader["champion_pct"])}</span>
+                </div>
+                <em>Vai erguer a taca</em>
+                <small>{html.escape(_showcase_summary_line(summary))}</small>
+            </div>
+        </div>
+        <div class="stage-metric-panel">
+            {_stage_metric_tile_html("Taca", leader.get("champion_pct"))}
+            {_stage_metric_tile_html("FNL", leader.get("final_pct"))}
+            {_stage_metric_tile_html("SF", leader.get("semifinal_pct"))}
+            {_stage_metric_tile_html("R16", leader.get("round_of_16_pct"))}
+        </div>
+    </section>
+    {_challenger_ranking_html(challengers, start_rank=2)}
+    """
+
+
+def _showcase_summary_line(summary: dict[str, Any]) -> str:
+    simulation_count = int(summary.get("simulation_count") or 0)
+    simulations = f"{simulation_count:,}".replace(",", ".")
+    last_created_at = summary.get("last_created_at") or "-"
+    return f"{simulations} simulacoes - modelo de simulacao - ultima execucao {last_created_at}"
+
+
+def _stage_metric_tile_html(label: str, value: Any) -> str:
+    return (
+        '<article class="stage-metric-tile">'
+        f"<span>{html.escape(label)}</span>"
+        f"<strong>{_format_metric_pct(value)}</strong>"
+        "</article>"
+    )
+
+
+def _challenger_ranking_html(rows: list[dict[str, Any]], *, start_rank: int) -> str:
+    if not rows:
+        return ""
+
+    rendered_rows = [
+        _challenger_row_html(row, rank=start_rank + index) for index, row in enumerate(rows)
+    ]
+    return f"""
+    <section class="challenger-ranking">
+        <div class="section-kicker">Candidatas seguintes</div>
+        <div class="challenger-list">{"".join(rendered_rows)}</div>
+    </section>
+    """
+
+
+def _challenger_row_html(row: dict[str, Any], *, rank: int) -> str:
+    team_id = str(row["team_id"])
+    stage_line = (
+        f"FNL {_format_compact_pct(row.get('final_pct'))} - "
+        f"SF {_format_compact_pct(row.get('semifinal_pct'))}"
+    )
+    return f"""
+    <article class="challenger-row">
+        <div class="challenger-rank">{rank:02d}</div>
+        {_team_flag_badge_html(team_id)}
+        <div class="challenger-team">
+            <strong>{html.escape(str(row["team_name"]))}</strong>
+            <span>{html.escape(stage_line)}</span>
+        </div>
+        <div class="challenger-title-prob">
+            <strong>{_format_one_decimal(row.get("champion_pct"))}</strong>
+            <span>Taca</span>
+        </div>
+    </article>
+    """
+
+
+def _team_flag_badge_html(team_id: str) -> str:
+    flag = TEAM_FLAG_EMOJI.get(team_id)
+    if flag:
+        return f'<span class="flag-badge" aria-label="{html.escape(team_id)}">{flag}</span>'
+    return f'<span class="flag-badge flag-fallback">{html.escape(team_id)}</span>'
+
+
+def _format_compact_pct(value: Any) -> str:
+    return f"{float(value or 0):.0f}%"
+
+
+def _format_one_decimal(value: Any) -> str:
+    return f"{float(value or 0):.1f}"
+
+
 def _metric_cards_html(
     cards: list[dict[str, Any]],
     *,
@@ -1967,6 +2181,133 @@ def _outcome_display(row: dict[str, Any], outcome: str) -> str:
     return "Empate"
 
 
+def _match_prediction_cards_html(
+    rows: list[dict[str, Any]],
+    *,
+    include_occurrence: bool,
+) -> str:
+    cards = [
+        _match_prediction_card_html(row, include_occurrence=include_occurrence) for row in rows
+    ]
+    return f'<div class="match-prediction-grid">{"".join(cards)}</div>'
+
+
+def _match_prediction_card_html(row: dict[str, Any], *, include_occurrence: bool) -> str:
+    predicted_outcome = _most_likely_outcome(row)
+    actual_outcome = _actual_outcome(row)
+    prediction_result = row.get("prediction_result")
+    predicted_label = _outcome_display(row, predicted_outcome)
+    actual_label = _outcome_display(row, actual_outcome) if actual_outcome else "-"
+    confidence_pct = _outcome_probability(row, predicted_outcome)
+    status_class = "pending"
+    status_label = "Aguardando real"
+    if prediction_result == "Acerto":
+        status_class = "hit"
+        status_label = "Acerto"
+    elif prediction_result == "Erro":
+        status_class = "miss"
+        status_label = "Erro"
+
+    meta_parts = [f"Jogo {int(row['match_number'])}"]
+    if row.get("bucket"):
+        meta_parts.append(f"{row['bucket']}")
+    if include_occurrence:
+        meta_parts.append(f"Ocorr. {_format_pct(row.get('occurrence_pct'))}%")
+    meta = " - ".join(meta_parts)
+
+    score_value = _format_actual_score(row)
+    score_class = "is-pending" if score_value == "-" else ""
+    score_label = "Placar real" if score_value != "-" else "A jogar"
+    status_badge = (
+        f'<span class="prediction-status {status_class}">{html.escape(status_label)}</span>'
+    )
+
+    return f"""
+    <article class="match-prediction-card">
+        <div class="match-prediction-topline">
+            <span>{html.escape(meta)}</span>
+            <span class="source-pill">{html.escape(_probability_source_label(row))}</span>
+        </div>
+        <div class="match-scoreboard">
+            <div class="match-team match-team-home">
+                <span class="team-code">{html.escape(str(row["home_team_id"]))}</span>
+                <strong>{html.escape(str(row["home_team_name"]))}</strong>
+            </div>
+            <div class="score-block {score_class}">
+                <strong>{html.escape(score_value if score_value != "-" else "vs")}</strong>
+                <span>{html.escape(score_label)}</span>
+            </div>
+            <div class="match-team match-team-away">
+                <span class="team-code">{html.escape(str(row["away_team_id"]))}</span>
+                <strong>{html.escape(str(row["away_team_name"]))}</strong>
+            </div>
+        </div>
+        <div class="prediction-summary">
+            <span>Modelo previa</span>
+            <strong>{html.escape(predicted_label)}</strong>
+            <em>{_format_metric_pct(confidence_pct)}</em>
+        </div>
+        {_probability_bar_html(row)}
+        <dl class="prediction-details">
+            <div>
+                <dt>Placar modelo</dt>
+                <dd>{html.escape(_format_score(row))}</dd>
+            </div>
+            <div>
+                <dt>Resultado real</dt>
+                <dd>{html.escape(actual_label)}</dd>
+            </div>
+            <div>
+                <dt>Modelo vs real</dt>
+                <dd>{status_badge}</dd>
+            </div>
+        </dl>
+    </article>
+    """
+
+
+def _probability_bar_html(row: dict[str, Any]) -> str:
+    probabilities = [
+        ("home", row["home_team_name"], float(row.get("home_win_pct") or 0), "home"),
+        ("draw", "Empate", float(row.get("draw_pct") or 0), "draw"),
+        ("away", row["away_team_name"], float(row.get("away_win_pct") or 0), "away"),
+    ]
+    segments = []
+    legend_items = []
+    for outcome, label, value, css_class in probabilities:
+        width = max(0.0, min(100.0, value))
+        is_favorite = outcome == _most_likely_outcome(row)
+        favorite_class = " is-favorite" if is_favorite else ""
+        segments.append(
+            (
+                f'<span class="probability-segment {css_class}{favorite_class}" '
+                f'style="width: {width:.4f}%"></span>'
+            ),
+        )
+        legend_items.append(
+            (
+                f'<span class="{css_class}{favorite_class}">'
+                f"<strong>{html.escape(str(label))}</strong>"
+                f"<em>{_format_metric_pct(value)}</em>"
+                "</span>"
+            ),
+        )
+    return (
+        '<div class="probability-visual">'
+        f'<div class="probability-bar">{"".join(segments)}</div>'
+        f'<div class="probability-legend">{"".join(legend_items)}</div>'
+        "</div>"
+    )
+
+
+def _actual_outcome(row: dict[str, Any]) -> str | None:
+    actual_home_goals = row.get("actual_home_goals")
+    actual_away_goals = row.get("actual_away_goals")
+    if actual_home_goals is None or actual_away_goals is None:
+        return None
+    return _score_outcome(int(actual_home_goals), int(actual_away_goals))
+
+
 def _probability_table_html(
     rows: list[dict[str, Any]],
     *,
@@ -2140,6 +2481,210 @@ def _inject_styles() -> None:
             color: rgba(255, 255, 255, 0.84);
             margin: 0.65rem 0 0;
             max-width: 760px;
+        }
+        .home-projection-showcase {
+            display: grid;
+            gap: 1rem;
+            grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.95fr);
+            margin: 0.35rem 0 1rem;
+        }
+        .favorite-panel,
+        .stage-metric-panel,
+        .challenger-row {
+            background:
+                linear-gradient(115deg, rgba(20, 91, 63, 0.92), rgba(8, 34, 29, 0.98)),
+                repeating-linear-gradient(
+                    90deg,
+                    rgba(255, 255, 255, 0.035) 0,
+                    rgba(255, 255, 255, 0.035) 1px,
+                    transparent 1px,
+                    transparent 52px
+                );
+            border: 1px solid rgba(111, 163, 135, 0.45);
+            color: #fbf6e8;
+        }
+        .favorite-panel {
+            border-left: 3px solid #f6c445;
+            border-radius: 8px;
+            display: flex;
+            min-height: 220px;
+            padding: 1.45rem 1.6rem;
+        }
+        .favorite-copy {
+            align-self: center;
+            min-width: 0;
+            width: 100%;
+        }
+        .favorite-copy p,
+        .section-kicker {
+            color: #f6c445;
+            font-size: 0.78rem;
+            font-weight: 900;
+            letter-spacing: 0.18em;
+            margin: 0 0 0.8rem;
+            text-transform: uppercase;
+        }
+        .favorite-title-line {
+            align-items: center;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem 1rem;
+        }
+        .favorite-title-line strong {
+            color: #fff8e6;
+            font-size: clamp(2.2rem, 5vw, 4.25rem);
+            font-weight: 950;
+            line-height: 0.95;
+            overflow-wrap: anywhere;
+            text-transform: uppercase;
+        }
+        .favorite-title-line span:last-child {
+            color: #f6c445;
+            font-size: clamp(2.4rem, 6vw, 5.1rem);
+            font-weight: 950;
+            line-height: 0.9;
+            white-space: nowrap;
+        }
+        .favorite-copy em {
+            color: rgba(251, 246, 232, 0.76);
+            display: block;
+            font-size: 0.82rem;
+            font-style: normal;
+            font-weight: 900;
+            letter-spacing: 0.16em;
+            margin-top: 0.85rem;
+            text-transform: uppercase;
+        }
+        .favorite-copy small {
+            color: rgba(251, 246, 232, 0.56);
+            display: block;
+            font-size: 0.78rem;
+            font-weight: 900;
+            letter-spacing: 0.08em;
+            margin-top: 1.45rem;
+            text-transform: uppercase;
+        }
+        .stage-metric-panel {
+            border-radius: 8px;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            overflow: hidden;
+        }
+        .stage-metric-tile {
+            border-bottom: 1px solid rgba(111, 163, 135, 0.28);
+            border-right: 1px solid rgba(111, 163, 135, 0.28);
+            min-height: 110px;
+            padding: 1.05rem;
+        }
+        .stage-metric-tile:nth-child(2n) {
+            border-right: 0;
+        }
+        .stage-metric-tile:nth-last-child(-n + 2) {
+            border-bottom: 0;
+        }
+        .stage-metric-tile span {
+            color: rgba(251, 246, 232, 0.62);
+            display: block;
+            font-size: 0.75rem;
+            font-weight: 900;
+            letter-spacing: 0.12em;
+            margin-bottom: 0.3rem;
+            text-transform: uppercase;
+        }
+        .stage-metric-tile strong {
+            color: #fbf6e8;
+            display: block;
+            font-size: clamp(2.2rem, 4vw, 3.2rem);
+            font-weight: 950;
+            line-height: 1;
+        }
+        .challenger-ranking {
+            margin: 0.3rem 0 1.35rem;
+        }
+        .challenger-ranking .section-kicker {
+            color: #344054;
+            margin: 0 0 0.65rem;
+        }
+        .challenger-list {
+            display: grid;
+            gap: 0.55rem;
+        }
+        .challenger-row {
+            align-items: center;
+            border-radius: 0;
+            display: grid;
+            gap: 0.9rem;
+            grid-template-columns: 44px 60px minmax(0, 1fr) auto;
+            min-height: 86px;
+            padding: 0.85rem 1rem;
+        }
+        .challenger-rank {
+            color: rgba(251, 246, 232, 0.52);
+            font-size: 1.65rem;
+            font-weight: 950;
+            font-variant-numeric: tabular-nums;
+            line-height: 1;
+        }
+        .flag-badge {
+            align-items: center;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            display: inline-flex;
+            font-size: 2.05rem;
+            height: 42px;
+            justify-content: center;
+            line-height: 1;
+            min-width: 54px;
+        }
+        .flag-fallback {
+            color: #fbf6e8;
+            font-size: 0.85rem;
+            font-weight: 900;
+            letter-spacing: 0.08em;
+        }
+        .challenger-team {
+            min-width: 0;
+        }
+        .challenger-team strong {
+            color: #fff8e6;
+            display: block;
+            font-size: 1.25rem;
+            font-weight: 950;
+            line-height: 1.1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .challenger-team span {
+            color: rgba(251, 246, 232, 0.55);
+            display: block;
+            font-size: 0.72rem;
+            font-weight: 900;
+            letter-spacing: 0.08em;
+            margin-top: 0.28rem;
+            text-transform: uppercase;
+        }
+        .challenger-title-prob {
+            min-width: 108px;
+            text-align: right;
+        }
+        .challenger-title-prob strong {
+            color: #fff8e6;
+            display: block;
+            font-size: 2.65rem;
+            font-weight: 950;
+            font-variant-numeric: tabular-nums;
+            line-height: 0.9;
+        }
+        .challenger-title-prob span {
+            color: rgba(251, 246, 232, 0.55);
+            display: block;
+            font-size: 0.68rem;
+            font-weight: 900;
+            letter-spacing: 0.12em;
+            margin-top: 0.25rem;
+            text-transform: uppercase;
         }
         .metric-grid {
             display: grid;
@@ -2455,7 +3000,226 @@ def _inject_styles() -> None:
             color: #0f6b5f;
             font-variant-numeric: tabular-nums;
         }
+        .match-prediction-grid {
+            display: grid;
+            gap: 0.85rem;
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+            margin-top: 1rem;
+        }
+        .match-prediction-card {
+            background: #ffffff;
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+            min-width: 0;
+            padding: 1rem;
+        }
+        .match-prediction-topline {
+            align-items: center;
+            color: #667085;
+            display: flex;
+            font-size: 0.74rem;
+            font-weight: 800;
+            gap: 0.75rem;
+            justify-content: space-between;
+            margin-bottom: 0.85rem;
+            text-transform: uppercase;
+        }
+        .source-pill,
+        .prediction-status {
+            border-radius: 999px;
+            display: inline-flex;
+            font-size: 0.72rem;
+            font-weight: 900;
+            line-height: 1;
+            padding: 0.35rem 0.5rem;
+            white-space: nowrap;
+        }
+        .source-pill {
+            background: #e6f4f1;
+            color: #0f6b5f;
+        }
+        .match-scoreboard {
+            align-items: center;
+            display: grid;
+            gap: 0.75rem;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        }
+        .match-team {
+            display: grid;
+            gap: 0.25rem;
+            min-width: 0;
+        }
+        .match-team-away {
+            text-align: right;
+        }
+        .match-team .team-code {
+            color: #667085;
+            font-size: 0.72rem;
+            font-weight: 900;
+        }
+        .match-team strong {
+            color: #18202f;
+            font-size: 1.1rem;
+            font-weight: 900;
+            line-height: 1.15;
+            overflow-wrap: anywhere;
+        }
+        .score-block {
+            background: #18202f;
+            border-radius: 8px;
+            color: #ffffff;
+            min-width: 92px;
+            padding: 0.65rem 0.8rem;
+            text-align: center;
+        }
+        .score-block.is-pending {
+            background: #f8fafc;
+            border: 1px solid #d8dde6;
+            color: #18202f;
+        }
+        .score-block strong {
+            display: block;
+            font-size: 1.55rem;
+            font-variant-numeric: tabular-nums;
+            font-weight: 900;
+            line-height: 1;
+        }
+        .score-block span {
+            color: inherit;
+            display: block;
+            font-size: 0.66rem;
+            font-weight: 800;
+            margin-top: 0.35rem;
+            opacity: 0.78;
+            text-transform: uppercase;
+        }
+        .prediction-summary {
+            align-items: center;
+            background: #f8fafc;
+            border: 1px solid #edf0f5;
+            border-radius: 8px;
+            display: grid;
+            gap: 0.25rem 0.65rem;
+            grid-template-columns: 1fr auto;
+            margin: 1rem 0 0.75rem;
+            padding: 0.75rem;
+        }
+        .prediction-summary span {
+            color: #667085;
+            font-size: 0.72rem;
+            font-weight: 800;
+            grid-column: 1 / -1;
+            text-transform: uppercase;
+        }
+        .prediction-summary strong {
+            color: #18202f;
+            font-weight: 900;
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+        .prediction-summary em {
+            color: #0f6b5f;
+            font-style: normal;
+            font-weight: 900;
+            white-space: nowrap;
+        }
+        .probability-visual {
+            display: grid;
+            gap: 0.55rem;
+        }
+        .probability-bar {
+            background: #edf0f5;
+            border-radius: 999px;
+            display: flex;
+            height: 0.85rem;
+            overflow: hidden;
+            width: 100%;
+        }
+        .probability-segment.home {
+            background: #0f6b5f;
+        }
+        .probability-segment.draw {
+            background: #9aa4b2;
+        }
+        .probability-segment.away {
+            background: #d65f4c;
+        }
+        .probability-segment.is-favorite {
+            box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.12);
+        }
+        .probability-legend {
+            display: grid;
+            gap: 0.35rem;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .probability-legend span {
+            min-width: 0;
+        }
+        .probability-legend strong,
+        .probability-legend em {
+            display: block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .probability-legend strong {
+            color: #475467;
+            font-size: 0.72rem;
+            font-weight: 800;
+        }
+        .probability-legend em {
+            color: #18202f;
+            font-size: 0.9rem;
+            font-style: normal;
+            font-weight: 900;
+            font-variant-numeric: tabular-nums;
+        }
+        .probability-legend .is-favorite strong,
+        .probability-legend .is-favorite em {
+            color: #0f6b5f;
+        }
+        .prediction-details {
+            border-top: 1px solid #edf0f5;
+            display: grid;
+            gap: 0.55rem;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            margin: 0.9rem 0 0;
+            padding-top: 0.75rem;
+        }
+        .prediction-details div {
+            min-width: 0;
+        }
+        .prediction-details dt {
+            color: #667085;
+            font-size: 0.7rem;
+            font-weight: 800;
+            margin: 0 0 0.25rem;
+            text-transform: uppercase;
+        }
+        .prediction-details dd {
+            color: #18202f;
+            font-size: 0.88rem;
+            font-weight: 900;
+            margin: 0;
+            overflow-wrap: anywhere;
+        }
+        .prediction-status.hit {
+            background: #e6f4f1;
+            color: #067647;
+        }
+        .prediction-status.miss {
+            background: #fee4e2;
+            color: #b42318;
+        }
+        .prediction-status.pending {
+            background: #f1f3f7;
+            color: #667085;
+        }
         @media (max-width: 1100px) {
+            .home-projection-showcase {
+                grid-template-columns: 1fr;
+            }
             .metric-grid,
             .metric-grid-four {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2481,6 +3245,34 @@ def _inject_styles() -> None:
             }
             .bracket-board {
                 grid-template-columns: repeat(2, minmax(210px, 1fr));
+            }
+            .favorite-panel {
+                min-height: 0;
+            }
+            .challenger-row {
+                grid-template-columns: 38px 52px minmax(0, 1fr);
+            }
+            .challenger-title-prob {
+                grid-column: 3;
+                min-width: 0;
+                text-align: left;
+            }
+            .challenger-title-prob strong {
+                font-size: 2rem;
+            }
+            .match-scoreboard {
+                grid-template-columns: 1fr;
+                text-align: left;
+            }
+            .match-team-away {
+                text-align: left;
+            }
+            .score-block {
+                justify-self: stretch;
+            }
+            .prediction-details,
+            .probability-legend {
+                grid-template-columns: 1fr;
             }
         }
         .prob-table-wrap {
