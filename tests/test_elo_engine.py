@@ -190,8 +190,19 @@ def test_dynamic_elo_stores_margin_and_experience_adjusted_k(tmp_path: Path) -> 
 
 
 def test_world_cup_qualifier_weight_is_more_specific_than_world_cup() -> None:
+    """Verify that World Cup qualifiers and qualifications map to the qualifier weight rather than main tournament weight.
+
+    Args:
+        None
+
+    Returns:
+        None
+    """
     assert _competition_weight("FIFA World Cup") == pytest.approx(2.5)
     assert _competition_weight("FIFA World Cup Qualifier") == pytest.approx(2.0)
+    assert _competition_weight("FIFA World Cup qualification") == pytest.approx(2.0)
+    assert _competition_weight("FIFA World Cup Qualification") == pytest.approx(2.0)
+    assert _competition_weight("FIFA World Cup qualifying") == pytest.approx(2.0)
 
 
 def test_goal_margin_multiplier_rewards_decisive_upsets_more_than_favorite_wins() -> None:
