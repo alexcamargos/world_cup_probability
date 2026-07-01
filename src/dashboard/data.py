@@ -147,6 +147,7 @@ def _load_round_probabilities(
             rows = _apply_outcome_prediction_overrides(con, rows, match_numbers)
         else:
             rows = _mark_probability_source(rows, PREDICTION_SOURCE_SIMULATION)
+        rows = _apply_favorite_outcome_score_overrides(con, rows, match_numbers)
 
     if dynamic_matchups and not show_all_matchups:
         top_rows: list[dict[str, Any]] = []
@@ -158,6 +159,101 @@ def _load_round_probabilities(
             top_rows.append(row)
             seen_match_numbers.add(match_number)
         return top_rows
+    return rows
+
+
+def _apply_favorite_outcome_score_overrides(
+    con: duckdb.DuckDBPyConnection,
+    rows: list[dict[str, Any]],
+    match_numbers: tuple[int, ...],
+) -> list[dict[str, Any]]:
+    """Use the modal score inside the favorite outcome bucket for each row."""
+    if not rows or not match_numbers:
+        return rows
+
+    placeholders = ", ".join("?" for _ in match_numbers)
+    result = con.execute(
+        f"""
+        WITH selected AS (
+            SELECT *
+            FROM simulated_results
+            WHERE match_number IN ({placeholders})
+        ),
+        score_stats AS (
+            SELECT
+                match_number,
+                home_team_id,
+                away_team_id,
+                CASE
+                    WHEN home_goals > away_goals THEN 'home'
+                    WHEN away_goals > home_goals THEN 'away'
+                    ELSE 'draw'
+                END AS score_outcome,
+                home_goals AS predicted_home_goals,
+                away_goals AS predicted_away_goals,
+                COUNT(*) AS score_appearances,
+                ROW_NUMBER() OVER (
+                    PARTITION BY
+                        match_number,
+                        home_team_id,
+                        away_team_id,
+                        CASE
+                            WHEN home_goals > away_goals THEN 'home'
+                            WHEN away_goals > home_goals THEN 'away'
+                            ELSE 'draw'
+                        END
+                    ORDER BY COUNT(*) DESC, home_goals + away_goals ASC, home_goals DESC
+                ) AS score_rank
+            FROM selected
+            GROUP BY
+                match_number,
+                home_team_id,
+                away_team_id,
+                score_outcome,
+                home_goals,
+                away_goals
+        )
+        SELECT
+            match_number,
+            home_team_id,
+            away_team_id,
+            score_outcome,
+            predicted_home_goals,
+            predicted_away_goals,
+            score_appearances
+        FROM score_stats
+        WHERE score_rank = 1
+        """,
+        match_numbers,
+    )
+    scores_by_key = {
+        (
+            int(row["match_number"]),
+            str(row["home_team_id"]),
+            str(row["away_team_id"]),
+            str(row["score_outcome"]),
+        ): row
+        for row in _query_dicts(result)
+    }
+
+    for row in rows:
+        favorite_outcome = _most_likely_outcome(row)
+        score_row = scores_by_key.get(
+            (
+                int(row["match_number"]),
+                str(row["home_team_id"]),
+                str(row["away_team_id"]),
+                favorite_outcome,
+            )
+        )
+        if score_row is None:
+            continue
+        row["predicted_home_goals"] = int(score_row["predicted_home_goals"])
+        row["predicted_away_goals"] = int(score_row["predicted_away_goals"])
+        row["score_occurrence_pct"] = round(
+            100.0 * float(score_row["score_appearances"]) / float(row["appearances"] or 1),
+            2,
+        )
     return rows
 
 
