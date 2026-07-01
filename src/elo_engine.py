@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import duckdb
+import polars as pl
 
 try:
     from .competition_filters import current_world_cup_exclusion_sql
@@ -186,6 +187,7 @@ def build_elo_history(
         )
         _log_elo_parameters(parameters, calibrated=calibrate_parameters)
 
+        history_records: list[dict] = []
         progress_interval = _elo_progress_interval(len(matches))
         LOGGER.info("Processing %d matches in strict chronological order.", len(matches))
         for match_number, match in enumerate(matches, start=1):
@@ -233,27 +235,32 @@ def build_elo_history(
             match_counts[match.home_team_id] = match_counts.get(match.home_team_id, 0) + 1
             match_counts[match.away_team_id] = match_counts.get(match.away_team_id, 0) + 1
 
-            _upsert_history(
-                con=con,
-                match=match,
-                home_before=home_before,
-                away_before=away_before,
-                home_after=home_after,
-                away_after=away_after,
-                home_expected=home_expected,
-                away_expected=away_expected,
-                home_actual=home_actual,
-                away_actual=away_actual,
-                k_factor=k_factor,
-                base_k_factor=parameters.base_k_factor,
-                competition_weight=competition_weight,
-                home_advantage_points=home_advantage if not neutral_site else 0.0,
-                goal_margin=goal_margin,
-                goal_margin_multiplier=goal_margin_multiplier,
-                experience_multiplier=experience_multiplier,
-                calibration_validation_error=parameters.validation_error,
-                neutral_site=neutral_site,
-            )
+            history_records.append({
+                "match_id": match.match_id,
+                "match_date": match.match_date,
+                "competition": match.competition,
+                "season": match.season,
+                "stage": match.stage,
+                "home_team_id": match.home_team_id,
+                "away_team_id": match.away_team_id,
+                "home_rating_before": home_before,
+                "away_rating_before": away_before,
+                "home_rating_after": home_after,
+                "away_rating_after": away_after,
+                "home_expected_score": home_expected,
+                "away_expected_score": away_expected,
+                "home_actual_score": home_actual,
+                "away_actual_score": away_actual,
+                "k_factor": k_factor,
+                "base_k_factor": parameters.base_k_factor,
+                "competition_weight": competition_weight,
+                "home_advantage_points": home_advantage if not neutral_site else 0.0,
+                "goal_margin": goal_margin,
+                "goal_margin_multiplier": goal_margin_multiplier,
+                "experience_multiplier": experience_multiplier,
+                "neutral_site": neutral_site,
+            })
+
             if _should_log_elo_progress(match_number, len(matches), progress_interval):
                 LOGGER.info(
                     "Elo progress: match %d/%d processed (%.1f%% complete).",
@@ -261,6 +268,102 @@ def build_elo_history(
                     len(matches),
                     100 * match_number / len(matches),
                 )
+
+        if history_records:
+            LOGGER.info("Performing bulk upsert of ELO history into database...")
+            df_history = pl.DataFrame(history_records)
+            con.register("df_history", df_history)
+            con.execute(
+                """
+                INSERT INTO f_elo_history (
+                    match_id,
+                    match_date,
+                    competition,
+                    season,
+                    stage,
+                    home_team_id,
+                    away_team_id,
+                    home_rating_before,
+                    away_rating_before,
+                    home_rating_after,
+                    away_rating_after,
+                    home_expected_score,
+                    away_expected_score,
+                    home_actual_score,
+                    away_actual_score,
+                    k_factor,
+                    base_k_factor,
+                    competition_weight,
+                    home_advantage_points,
+                    goal_margin,
+                    goal_margin_multiplier,
+                    experience_multiplier,
+                    elo_parameter_version,
+                    calibration_validation_error,
+                    neutral_site,
+                    source_file,
+                    loaded_at,
+                    updated_at
+                )
+                SELECT
+                    match_id,
+                    match_date,
+                    competition,
+                    season,
+                    stage,
+                    home_team_id,
+                    away_team_id,
+                    home_rating_before,
+                    away_rating_before,
+                    home_rating_after,
+                    away_rating_after,
+                    home_expected_score,
+                    away_expected_score,
+                    home_actual_score,
+                    away_actual_score,
+                    k_factor,
+                    base_k_factor,
+                    competition_weight,
+                    home_advantage_points,
+                    goal_margin,
+                    goal_margin_multiplier,
+                    experience_multiplier,
+                    ? AS elo_parameter_version,
+                    ? AS calibration_validation_error,
+                    neutral_site,
+                    NULL AS source_file,
+                    NULL AS loaded_at,
+                    current_timestamp AS updated_at
+                FROM df_history
+                ON CONFLICT (match_id) DO UPDATE SET
+                    match_date = excluded.match_date,
+                    competition = excluded.competition,
+                    season = excluded.season,
+                    stage = excluded.stage,
+                    home_team_id = excluded.home_team_id,
+                    away_team_id = excluded.away_team_id,
+                    home_rating_before = excluded.home_rating_before,
+                    away_rating_before = excluded.away_rating_before,
+                    home_rating_after = excluded.home_rating_after,
+                    away_rating_after = excluded.away_rating_after,
+                    home_expected_score = excluded.home_expected_score,
+                    away_expected_score = excluded.away_expected_score,
+                    home_actual_score = excluded.home_actual_score,
+                    away_actual_score = excluded.away_actual_score,
+                    k_factor = excluded.k_factor,
+                    base_k_factor = excluded.base_k_factor,
+                    competition_weight = excluded.competition_weight,
+                    home_advantage_points = excluded.home_advantage_points,
+                    goal_margin = excluded.goal_margin,
+                    goal_margin_multiplier = excluded.goal_margin_multiplier,
+                    experience_multiplier = excluded.experience_multiplier,
+                    elo_parameter_version = excluded.elo_parameter_version,
+                    calibration_validation_error = excluded.calibration_validation_error,
+                    neutral_site = excluded.neutral_site,
+                    updated_at = now();
+                """,
+                [ELO_PARAMETER_VERSION, parameters.validation_error],
+            )
 
     LOGGER.info("World Cup Probability Elo history updated successfully.")
 
@@ -549,146 +652,6 @@ def _load_matches(con: duckdb.DuckDBPyConnection) -> list[MatchRecord]:
         )
         for row in rows
     ]
-
-
-def _upsert_history(
-    *,
-    con: duckdb.DuckDBPyConnection,
-    match: MatchRecord,
-    home_before: float,
-    away_before: float,
-    home_after: float,
-    away_after: float,
-    home_expected: float,
-    away_expected: float,
-    home_actual: float,
-    away_actual: float,
-    k_factor: float,
-    base_k_factor: float,
-    competition_weight: float,
-    home_advantage_points: float,
-    goal_margin: int,
-    goal_margin_multiplier: float,
-    experience_multiplier: float,
-    calibration_validation_error: float | None,
-    neutral_site: bool,
-) -> None:
-    con.execute(
-        """
-        INSERT INTO f_elo_history (
-            match_id,
-            match_date,
-            competition,
-            season,
-            stage,
-            home_team_id,
-            away_team_id,
-            home_rating_before,
-            away_rating_before,
-            home_rating_after,
-            away_rating_after,
-            home_expected_score,
-            away_expected_score,
-            home_actual_score,
-            away_actual_score,
-            k_factor,
-            base_k_factor,
-            competition_weight,
-            home_advantage_points,
-            goal_margin,
-            goal_margin_multiplier,
-            experience_multiplier,
-            elo_parameter_version,
-            calibration_validation_error,
-            neutral_site,
-            source_file,
-            loaded_at,
-            updated_at
-        ) VALUES (
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            NULL,
-            NULL,
-            current_timestamp
-        )
-        ON CONFLICT (match_id) DO UPDATE SET
-            match_date = excluded.match_date,
-            competition = excluded.competition,
-            season = excluded.season,
-            stage = excluded.stage,
-            home_team_id = excluded.home_team_id,
-            away_team_id = excluded.away_team_id,
-            home_rating_before = excluded.home_rating_before,
-            away_rating_before = excluded.away_rating_before,
-            home_rating_after = excluded.home_rating_after,
-            away_rating_after = excluded.away_rating_after,
-            home_expected_score = excluded.home_expected_score,
-            away_expected_score = excluded.away_expected_score,
-            home_actual_score = excluded.home_actual_score,
-            away_actual_score = excluded.away_actual_score,
-            k_factor = excluded.k_factor,
-            base_k_factor = excluded.base_k_factor,
-            competition_weight = excluded.competition_weight,
-            home_advantage_points = excluded.home_advantage_points,
-            goal_margin = excluded.goal_margin,
-            goal_margin_multiplier = excluded.goal_margin_multiplier,
-            experience_multiplier = excluded.experience_multiplier,
-            elo_parameter_version = excluded.elo_parameter_version,
-            calibration_validation_error = excluded.calibration_validation_error,
-            neutral_site = excluded.neutral_site,
-            updated_at = now();
-        """,
-        [
-            match.match_id,
-            match.match_date,
-            match.competition,
-            match.season,
-            match.stage,
-            match.home_team_id,
-            match.away_team_id,
-            home_before,
-            away_before,
-            home_after,
-            away_after,
-            home_expected,
-            away_expected,
-            home_actual,
-            away_actual,
-            k_factor,
-            base_k_factor,
-            competition_weight,
-            home_advantage_points,
-            goal_margin,
-            goal_margin_multiplier,
-            experience_multiplier,
-            ELO_PARAMETER_VERSION,
-            calibration_validation_error,
-            neutral_site,
-        ],
-    )
 
 
 def _expected_score(rating_for: float, rating_against: float) -> float:
