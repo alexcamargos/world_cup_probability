@@ -9,6 +9,7 @@ scores from the current tournament are never used as simulation inputs.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import re
@@ -36,6 +37,7 @@ try:
         DEFAULT_BATCH_SIZE,
         DEFAULT_ITERATIONS,
         DEFAULT_SEED,
+        DIXON_COLES_CALIBRATION_PATH,
         MODEL_PATH,
     )
     from .world_cup_2026_schedule import (
@@ -53,7 +55,14 @@ except ImportError:  # pragma: no cover - supports direct script execution.
         load_outcome_model_artifact,
         predict_match_probabilities,
     )
-    from settings import DB_PATH, DEFAULT_BATCH_SIZE, DEFAULT_ITERATIONS, DEFAULT_SEED, MODEL_PATH
+    from settings import (  # type: ignore[no-redef]
+        DB_PATH,
+        DEFAULT_BATCH_SIZE,
+        DEFAULT_ITERATIONS,
+        DEFAULT_SEED,
+        DIXON_COLES_CALIBRATION_PATH,
+        MODEL_PATH,
+    )
     from world_cup_2026_schedule import (  # type: ignore[no-redef]
         TEAM_COUNTRIES,
         TEAM_NAMES,
@@ -75,6 +84,10 @@ DIXON_COLES_OUTCOME_HYBRID_SCORE_ENGINE = "outcome_hybrid_dixon_coles"
 DEFAULT_DIXON_COLES_RHO = -0.10
 MIN_DIXON_COLES_RHO = -0.95
 MAX_DIXON_COLES_RHO = 0.95
+DEFAULT_DIXON_COLES_RHO_MIN = -0.40
+DEFAULT_DIXON_COLES_RHO_MAX = 0.30
+DEFAULT_DIXON_COLES_RHO_STEP = 0.01
+DIXON_COLES_LOG_EPSILON = 1e-15
 MAX_DIXON_COLES_SCORE_ATTEMPTS = 64
 MAX_CONDITIONAL_SCORE_ATTEMPTS = 256
 
@@ -97,6 +110,19 @@ class OutcomeModelContext:
     model: xgb.XGBClassifier
     team_features: dict[str, dict[str, float]]
     calibration_temperature: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DixonColesCalibrationResult:
+    """Validation result for a calibrated Dixon-Coles dependence parameter."""
+
+    rho: float
+    mean_negative_log_likelihood: float
+    validation_rows: int
+    candidate_count: int
+    default_rho: float
+    default_mean_negative_log_likelihood: float
+    candidate_scores: tuple[tuple[float, float], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1204,6 +1230,276 @@ def _validate_dixon_coles_rho(rho: float) -> None:
         )
 
 
+def calibrate_dixon_coles_rho(
+    *,
+    home_goals: np.ndarray,
+    away_goals: np.ndarray,
+    home_lambdas: np.ndarray,
+    away_lambdas: np.ndarray,
+    candidate_rhos: Sequence[float] | None = None,
+    default_rho: float = DEFAULT_DIXON_COLES_RHO,
+) -> DixonColesCalibrationResult:
+    """Choose the Dixon-Coles rho with the lowest validation score log loss."""
+    home_goals = np.asarray(home_goals, dtype=int)
+    away_goals = np.asarray(away_goals, dtype=int)
+    home_lambdas = np.asarray(home_lambdas, dtype=float)
+    away_lambdas = np.asarray(away_lambdas, dtype=float)
+    row_count = int(home_goals.size)
+    if row_count == 0:
+        raise RuntimeError("Cannot calibrate Dixon-Coles rho from an empty validation set.")
+    if not (
+        away_goals.size == row_count
+        and home_lambdas.size == row_count
+        and away_lambdas.size == row_count
+    ):
+        raise ValueError("Dixon-Coles calibration arrays must have the same length.")
+
+    candidates = tuple(candidate_rhos or _default_dixon_coles_rho_grid())
+    if not candidates:
+        raise ValueError("candidate_rhos must contain at least one value.")
+    for rho in (*candidates, default_rho):
+        _validate_dixon_coles_rho(float(rho))
+
+    candidate_scores = tuple(
+        (
+            float(rho),
+            _dixon_coles_mean_negative_log_likelihood(
+                home_goals=home_goals,
+                away_goals=away_goals,
+                home_lambdas=home_lambdas,
+                away_lambdas=away_lambdas,
+                rho=float(rho),
+            ),
+        )
+        for rho in candidates
+    )
+    best_rho, best_score = min(candidate_scores, key=lambda item: (item[1], abs(item[0])))
+    default_score = _dixon_coles_mean_negative_log_likelihood(
+        home_goals=home_goals,
+        away_goals=away_goals,
+        home_lambdas=home_lambdas,
+        away_lambdas=away_lambdas,
+        rho=default_rho,
+    )
+    return DixonColesCalibrationResult(
+        rho=float(best_rho),
+        mean_negative_log_likelihood=float(best_score),
+        validation_rows=row_count,
+        candidate_count=len(candidate_scores),
+        default_rho=float(default_rho),
+        default_mean_negative_log_likelihood=float(default_score),
+        candidate_scores=candidate_scores,
+    )
+
+
+def calibrate_dixon_coles_from_project_data(
+    *,
+    db_path: Path = DB_PATH,
+    calibration_path: Path = DIXON_COLES_CALIBRATION_PATH,
+    validation_fraction: float = 0.2,
+    rho_min: float = DEFAULT_DIXON_COLES_RHO_MIN,
+    rho_max: float = DEFAULT_DIXON_COLES_RHO_MAX,
+    rho_step: float = DEFAULT_DIXON_COLES_RHO_STEP,
+    model_params: dict[str, object] | None = None,
+) -> DixonColesCalibrationResult:
+    """Train a temporal validation Poisson model and persist the best Dixon-Coles rho."""
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be greater than 0 and less than 1.")
+
+    try:
+        import polars as pl
+
+        from .model import (
+            FEATURE_COLUMNS,
+            _historical_training_frame,
+            _positive_predictions,
+            load_training_frame,
+            prepare_full_training_matrix,
+            train_poisson_model,
+        )
+    except ImportError:  # pragma: no cover - supports direct script execution.
+        import polars as pl  # type: ignore[no-redef]
+
+        from model import (  # type: ignore[no-redef]
+            FEATURE_COLUMNS,
+            _historical_training_frame,
+            _positive_predictions,
+            load_training_frame,
+            prepare_full_training_matrix,
+            train_poisson_model,
+        )
+
+    frame = _historical_training_frame(load_training_frame(db_path))
+    if frame.height < 2:
+        raise RuntimeError("At least two historical rows are required for rho calibration.")
+
+    split_index = int(frame.height * (1.0 - validation_fraction))
+    split_index = min(max(split_index, 1), frame.height - 1)
+    train_frame = frame.slice(0, split_index)
+    valid_frame = frame.slice(split_index)
+    X_train, y_train, _ = prepare_full_training_matrix(train_frame)
+    X_valid, y_valid, _ = prepare_full_training_matrix(valid_frame)
+    validation_model = train_poisson_model(X_train, y_train, X_valid, y_valid, params=model_params)
+    home_lambdas = _positive_predictions(validation_model.predict(X_valid))
+    away_lambdas = _positive_predictions(
+        validation_model.predict(_flipped_feature_matrix(valid_frame, FEATURE_COLUMNS, pl)),
+    )
+    result = calibrate_dixon_coles_rho(
+        home_goals=valid_frame.get_column("home_goals").cast(pl.Int64).to_numpy(),
+        away_goals=valid_frame.get_column("away_goals").cast(pl.Int64).to_numpy(),
+        home_lambdas=home_lambdas,
+        away_lambdas=away_lambdas,
+        candidate_rhos=_dixon_coles_rho_grid(rho_min, rho_max, rho_step),
+    )
+    save_dixon_coles_calibration(calibration_path=calibration_path, result=result)
+    LOGGER.info(
+        "Dixon-Coles calibration saved to %s: rho %.3f (validation NLL %.4f, rows %d).",
+        calibration_path,
+        result.rho,
+        result.mean_negative_log_likelihood,
+        result.validation_rows,
+    )
+    return result
+
+
+def save_dixon_coles_calibration(
+    *,
+    calibration_path: Path = DIXON_COLES_CALIBRATION_PATH,
+    result: DixonColesCalibrationResult,
+) -> Path:
+    """Persist a calibrated Dixon-Coles rho artifact."""
+    calibration_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "method": "temporal_validation_grid_search",
+        "rho": result.rho,
+        "mean_negative_log_likelihood": result.mean_negative_log_likelihood,
+        "validation_rows": result.validation_rows,
+        "candidate_count": result.candidate_count,
+        "default_rho": result.default_rho,
+        "default_mean_negative_log_likelihood": result.default_mean_negative_log_likelihood,
+        "candidate_scores": [
+            {"rho": rho, "mean_negative_log_likelihood": score}
+            for rho, score in result.candidate_scores
+        ],
+    }
+    calibration_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return calibration_path
+
+
+def load_dixon_coles_rho(
+    *,
+    calibration_path: Path = DIXON_COLES_CALIBRATION_PATH,
+    fallback_rho: float = DEFAULT_DIXON_COLES_RHO,
+) -> float:
+    """Load a calibrated Dixon-Coles rho, falling back to the documented default."""
+    if not calibration_path.exists():
+        return fallback_rho
+    payload = json.loads(calibration_path.read_text(encoding="utf-8"))
+    rho = float(payload.get("rho", fallback_rho))
+    _validate_dixon_coles_rho(rho)
+    return rho
+
+
+def _default_dixon_coles_rho_grid() -> tuple[float, ...]:
+    return _dixon_coles_rho_grid(
+        DEFAULT_DIXON_COLES_RHO_MIN,
+        DEFAULT_DIXON_COLES_RHO_MAX,
+        DEFAULT_DIXON_COLES_RHO_STEP,
+    )
+
+
+def _dixon_coles_rho_grid(rho_min: float, rho_max: float, rho_step: float) -> tuple[float, ...]:
+    if rho_step <= 0.0:
+        raise ValueError("rho_step must be greater than zero.")
+    if rho_min > rho_max:
+        raise ValueError("rho_min must be less than or equal to rho_max.")
+    _validate_dixon_coles_rho(rho_min)
+    _validate_dixon_coles_rho(rho_max)
+    steps = int(round((rho_max - rho_min) / rho_step))
+    return tuple(round(rho_min + index * rho_step, 10) for index in range(steps + 1))
+
+
+def _dixon_coles_mean_negative_log_likelihood(
+    *,
+    home_goals: np.ndarray,
+    away_goals: np.ndarray,
+    home_lambdas: np.ndarray,
+    away_lambdas: np.ndarray,
+    rho: float,
+) -> float:
+    log_likelihood = 0.0
+    for actual_home, actual_away, home_lambda, away_lambda in zip(
+        home_goals,
+        away_goals,
+        home_lambdas,
+        away_lambdas,
+        strict=True,
+    ):
+        probability = _dixon_coles_score_probability(
+            int(actual_home),
+            int(actual_away),
+            float(home_lambda),
+            float(away_lambda),
+            rho,
+        )
+        log_likelihood += math.log(max(probability, DIXON_COLES_LOG_EPSILON))
+    return float(-log_likelihood / home_goals.size)
+
+
+def _dixon_coles_score_probability(
+    home_goals: int,
+    away_goals: int,
+    home_lambda: float,
+    away_lambda: float,
+    rho: float,
+) -> float:
+    home_rate = max(float(home_lambda), 0.0)
+    away_rate = max(float(away_lambda), 0.0)
+    base_probability = _poisson_probability(home_goals, home_rate) * _poisson_probability(
+        away_goals,
+        away_rate,
+    )
+    tau = _dixon_coles_tau(home_goals, away_goals, home_rate, away_rate, rho)
+    normalizer = _dixon_coles_normalizer(home_rate, away_rate, rho)
+    if normalizer <= 0.0:
+        return 0.0
+    return float(base_probability * tau / normalizer)
+
+
+def _dixon_coles_normalizer(home_lambda: float, away_lambda: float, rho: float) -> float:
+    low_scores = ((0, 0), (0, 1), (1, 0), (1, 1))
+    adjustment = 0.0
+    for home_goals, away_goals in low_scores:
+        base_probability = _poisson_probability(home_goals, home_lambda) * _poisson_probability(
+            away_goals,
+            away_lambda,
+        )
+        adjustment += base_probability * (
+            _dixon_coles_tau(home_goals, away_goals, home_lambda, away_lambda, rho) - 1.0
+        )
+    return 1.0 + adjustment
+
+
+def _poisson_probability(goals: int, rate: float) -> float:
+    if goals < 0:
+        return 0.0
+    if rate <= 0.0:
+        return 1.0 if goals == 0 else 0.0
+    return float(math.exp(-rate + goals * math.log(rate) - math.lgamma(goals + 1)))
+
+
+def _flipped_feature_matrix(
+    frame: object,
+    feature_columns: Sequence[str],
+    pl: object,
+) -> np.ndarray:
+    expressions = []
+    for column in feature_columns:
+        expression = pl.col(column) if column == "is_friendly_match" else -pl.col(column)
+        expressions.append(expression.alias(column))
+    return frame.select(expressions).to_numpy()
+
+
 def _poisson_score_engine(dixon_coles_rho: float) -> str:
     if math.isclose(dixon_coles_rho, 0.0, abs_tol=1e-12):
         return POISSON_SCORE_ENGINE
@@ -1297,10 +1593,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dixon-coles-rho",
         type=float,
-        default=DEFAULT_DIXON_COLES_RHO,
+        default=None,
         help=(
-            "Low-score Dixon-Coles dependence parameter. Use 0.0 for independent "
-            "Poisson score sampling."
+            "Override the calibrated low-score Dixon-Coles dependence parameter. "
+            "Use 0.0 for independent Poisson score sampling."
         ),
     )
     return parser
@@ -1315,7 +1611,8 @@ def run_simulation_from_project_data(
     seed: int | None = DEFAULT_SEED,
     export_reports: bool = False,
     use_outcome_model: bool = True,
-    dixon_coles_rho: float = DEFAULT_DIXON_COLES_RHO,
+    dixon_coles_rho: float | None = None,
+    dixon_coles_calibration_path: Path = DIXON_COLES_CALIBRATION_PATH,
 ) -> None:
     """Build team lambdas from the local warehouse/model and simulate the tournament."""
     if not db_path.exists():
@@ -1333,6 +1630,11 @@ def run_simulation_from_project_data(
     outcome_model_context = (
         load_outcome_model_context(db_path=db_path) if use_outcome_model else None
     )
+    resolved_dixon_coles_rho = (
+        dixon_coles_rho
+        if dixon_coles_rho is not None
+        else load_dixon_coles_rho(calibration_path=dixon_coles_calibration_path)
+    )
     simulate_world_cup(
         team_lambdas,
         iterations=iterations,
@@ -1340,7 +1642,7 @@ def run_simulation_from_project_data(
         db_path=db_path,
         seed=seed,
         outcome_model_context=outcome_model_context,
-        dixon_coles_rho=dixon_coles_rho,
+        dixon_coles_rho=resolved_dixon_coles_rho,
     )
     if export_reports:
         export_analytics(db_path=db_path)
@@ -1401,6 +1703,48 @@ def main() -> int:
         export_reports=args.export_analytics,
         use_outcome_model=not args.disable_outcome_model,
         dixon_coles_rho=args.dixon_coles_rho,
+    )
+    return 0
+
+
+def build_dixon_coles_calibration_parser() -> argparse.ArgumentParser:
+    """Build CLI parser for Dixon-Coles rho calibration."""
+    parser = argparse.ArgumentParser(
+        description="Calibrate Dixon-Coles rho by temporal validation.",
+    )
+    parser.add_argument("--db-path", type=Path, default=DB_PATH, help="DuckDB warehouse path.")
+    parser.add_argument(
+        "--calibration-path",
+        type=Path,
+        default=DIXON_COLES_CALIBRATION_PATH,
+        help="Output calibration JSON path.",
+    )
+    parser.add_argument(
+        "--validation-fraction",
+        type=float,
+        default=0.2,
+        help="Most recent historical fraction used for rho validation.",
+    )
+    parser.add_argument("--rho-min", type=float, default=DEFAULT_DIXON_COLES_RHO_MIN)
+    parser.add_argument("--rho-max", type=float, default=DEFAULT_DIXON_COLES_RHO_MAX)
+    parser.add_argument("--rho-step", type=float, default=DEFAULT_DIXON_COLES_RHO_STEP)
+    return parser
+
+
+def calibrate_dixon_coles_main() -> int:
+    """CLI entrypoint for Dixon-Coles rho calibration."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    )
+    args = build_dixon_coles_calibration_parser().parse_args()
+    calibrate_dixon_coles_from_project_data(
+        db_path=args.db_path,
+        calibration_path=args.calibration_path,
+        validation_fraction=args.validation_fraction,
+        rho_min=args.rho_min,
+        rho_max=args.rho_max,
+        rho_step=args.rho_step,
     )
     return 0
 
